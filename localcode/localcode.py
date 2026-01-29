@@ -26,6 +26,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Ensure 'localcode' is importable as a package even when this file is run
+# directly as a script (python3 /path/to/localcode/localcode.py).
+# In that case, the directory containing this file IS the package but Python
+# doesn't know that — we add the parent dir to sys.path so that
+# `from localcode import hooks` resolves to the package's hooks.py.
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_this_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
+from localcode import hooks
+from localcode.middleware import logging_hook
+
 API_URL = "http://localhost:1234/v1/chat/completions"
 DEFAULT_MODEL = "gpt-oss-120b@8bit"
 MODEL = DEFAULT_MODEL
@@ -47,7 +60,7 @@ TOOL_DIR = os.path.join(BASE_DIR, "tools")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 SESSION_DIR = os.path.join(BASE_DIR, ".localcode/sessions")
 
-LOG_PATH: Optional[str] = None
+LOG_PATH: Optional[str] = None  # Deprecated: use logging_hook.get_log_path(). Kept for backward compat.
 AGENT_NAME: Optional[str] = None
 AGENT_SETTINGS: Dict[str, Any] = {}
 CONTINUE_SESSION = False
@@ -636,43 +649,36 @@ def find_latest_session(agent_name: str) -> Optional[str]:
     return files[0]
 
 
-def log_event(event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
-    if not LOG_PATH:
-        return
-    rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "event": event_type}
-    if RUN_NAME:
-        rec["run_name"] = RUN_NAME
-    if TASK_ID:
-        rec["task_id"] = TASK_ID
-    if TASK_INDEX:
-        rec["task_index"] = TASK_INDEX
-    if TASK_TOTAL:
-        rec["task_total"] = TASK_TOTAL
-    if AGENT_NAME:
-        rec["agent"] = AGENT_NAME
-    if payload:
-        rec.update(payload)
-    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-    with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-
 def init_logging() -> None:
-    global LOG_PATH
-    if LOG_PATH:
+    """Initialize JSONL logging via logging_hook."""
+    if logging_hook.get_log_path():
         return
-    os.makedirs(LOG_DIR, exist_ok=True)
-    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    safe_agent = re.sub(r"[^A-Za-z0-9_.-]", "_", AGENT_NAME or "agent")
-    LOG_PATH = os.path.join(LOG_DIR, f"localcode_{safe_agent}_{timestamp}.jsonl")
-    log_event("session_start", {
+    logging_hook.init_logging(LOG_DIR, AGENT_NAME)
+    _sync_logging_context()
+    logging_hook.log_event("session_start", {
         "model": MODEL,
         "cwd": os.getcwd(),
-        "log_path": LOG_PATH,
+        "log_path": logging_hook.get_log_path(),
         "mode": "single_agent_native_tools",
         "agent": AGENT_NAME,
         "agent_settings": AGENT_SETTINGS,
     })
+
+
+def _sync_logging_context() -> None:
+    """Sync global state into logging_hook run context."""
+    ctx: Dict[str, Any] = {}
+    if RUN_NAME:
+        ctx["run_name"] = RUN_NAME
+    if TASK_ID:
+        ctx["task_id"] = TASK_ID
+    if TASK_INDEX:
+        ctx["task_index"] = TASK_INDEX
+    if TASK_TOTAL:
+        ctx["task_total"] = TASK_TOTAL
+    if AGENT_NAME:
+        ctx["agent"] = AGENT_NAME
+    logging_hook.update_run_context(ctx)
 
 
 def save_session(agent_name: str, messages: List[Dict[str, Any]], model: str) -> None:
@@ -697,10 +703,13 @@ def save_session(agent_name: str, messages: List[Dict[str, Any]], model: str) ->
         "created": created or time.strftime("%Y-%m-%dT%H:%M:%S"),
         "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    # Hook: session_save (read-only notification)
+    hooks.emit("session_save", {"messages": messages, "path": CURRENT_SESSION_PATH})
+
     with open(CURRENT_SESSION_PATH, "w", encoding="utf-8") as f:
         json.dump(session_data, f, indent=2, ensure_ascii=False)
 
-    log_event("session_saved", {"path": CURRENT_SESSION_PATH, "message_count": len(messages)})
+    logging_hook.log_event("session_saved", {"path": CURRENT_SESSION_PATH, "message_count": len(messages)})
 
 
 def load_session(agent_name: str) -> List[Dict[str, Any]]:
@@ -713,10 +722,10 @@ def load_session(agent_name: str) -> List[Dict[str, Any]]:
             session_data = json.load(f)
         msgs = session_data.get("messages", [])
         CURRENT_SESSION_PATH = latest
-        log_event("session_loaded", {"path": latest, "message_count": len(msgs)})
+        logging_hook.log_event("session_loaded", {"path": latest, "message_count": len(msgs)})
         return msgs
     except Exception as e:
-        log_event("session_load_error", {"path": latest, "error": str(e)})
+        logging_hook.log_event("session_load_error", {"path": latest, "error": str(e)})
         return []
 
 
@@ -2677,7 +2686,7 @@ def _append_feedback(
     attempt: Optional[int] = None,
 ) -> None:
     messages.append({"role": "user", "content": text})
-    log_event("runtime_feedback", {
+    logging_hook.log_event("runtime_feedback", {
         "turn": turn,
         "request_id": request_id,
         "reason": reason,
@@ -2706,7 +2715,7 @@ def process_tool_call(tools_dict: ToolsDict, tc: Dict[str, Any]) -> Tuple[str, D
                 patch = _extract_patch_block(str(raw_args))
                 if patch:
                     tool_args = {"patch": patch}
-                    log_event("format_repair", {
+                    logging_hook.log_event("format_repair", {
                         "tool": "apply_patch",
                         "reason": "patch_block_recover",
                     })
@@ -2893,13 +2902,20 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
     all_inference_params = {}
     for k, v in INFERENCE_PARAMS.items():
         all_inference_params[k] = v if v is not None else "server_default"
-    log_event("request", {
+    logging_hook.log_event("request", {
         "tools": list(tools_dict.keys()),
         "tools_display": [TOOL_DISPLAY_MAP.get(n, n) for n in tools_dict.keys()],
         "message_summary": summarize_messages(full_messages),
         "request_params": {k: v for k, v in request_data.items() if k not in ("messages", "tools")},
         "inference_params_full": all_inference_params,
     })
+
+    # Hook: api_request (mutable — hooks can modify request_data)
+    hook_data = hooks.emit("api_request", {
+        "messages": full_messages,
+        "request_data": request_data,
+    })
+    request_data = hook_data.get("request_data", request_data)
 
     req = urllib.request.Request(
         API_URL,
@@ -2911,14 +2927,16 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
         resp = urllib.request.urlopen(req, timeout=300)
         raw = resp.read()
     except Exception as exc:
-        log_event("request_error", {"error": str(exc)})
+        logging_hook.log_event("request_error", {"error": str(exc)})
+        hooks.emit("api_error", {"error": str(exc), "phase": "request"})
         return {"error": f"request failed: {exc}"}
 
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         preview = raw[:200].decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)[:200]
-        log_event("response_error", {"error": str(exc), "raw_preview": preview})
+        logging_hook.log_event("response_error", {"error": str(exc), "raw_preview": preview})
+        hooks.emit("api_error", {"error": str(exc), "phase": "parse", "raw_preview": preview})
         return {"error": f"invalid JSON response: {exc}"}
 
     request_id = payload.get("request_id")
@@ -2940,7 +2958,16 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
         meta["timings"] = timings
         meta["prefill_tps"] = round(timings.get("prompt_per_second", 0), 2)
         meta["decode_tps"] = round(timings.get("predicted_per_second", 0), 2)
-    log_event("response_meta", meta)
+    logging_hook.log_event("response_meta", meta)
+
+    # Hook: api_response (read-only notification)
+    hooks.emit("api_response", {
+        "response": payload,
+        "usage": payload.get("usage", {}),
+        "timings": timings,
+        "request_id": payload.get("request_id"),
+    })
+
     return payload
 
 
@@ -3034,21 +3061,36 @@ def run_agent(
     global LAST_RUN_SUMMARY, CURRENT_MESSAGES
     LAST_RUN_SUMMARY = None
 
+    # Install middleware hooks (idempotent — clears previous hooks first)
+    hooks.clear()
+    from localcode.middleware import feedback_hook, metrics_hook, conversation_dump
+    logging_hook.install(log_path=logging_hook.get_log_path(), run_context={
+        "run_name": RUN_NAME, "task_id": TASK_ID,
+        "task_index": TASK_INDEX, "task_total": TASK_TOTAL,
+        "agent": AGENT_NAME,
+    })
+    feedback_hook.install(tools_dict=tools_dict, display_map=TOOL_DISPLAY_MAP)
+    feedback_hook.set_functions(
+        build_feedback_text_fn=build_feedback_text,
+        display_tool_name_fn=display_tool_name,
+    )
+    _metrics = metrics_hook.install()
+    conversation_dump.install()
+
     messages = (previous_messages or []) + [{"role": "user", "content": prompt}]
     CURRENT_MESSAGES = messages  # Keep global reference for tools like plan_solution
     turns = 0
     last_request_id: Optional[str] = None
-
-    tool_calls_total = 0
-    tool_errors_total = 0
-    tool_call_counts: Dict[str, int] = {}
-    tool_error_counts: Dict[str, int] = {}
-    feedback_counts: Counter[str] = Counter()
-    patch_fail_count: Dict[str, int] = {}
     task_header_printed = False
 
+    # Emit agent_start hook (also resets _metrics)
+    hooks.emit("agent_start", {
+        "prompt": prompt,
+        "settings": agent_settings,
+        "messages": messages,
+    })
+
     format_retries = 0
-    analysis_retries = 0
 
     min_tool_calls = int(agent_settings.get("min_tool_calls", 0) or 0)
     max_format_retries = int(agent_settings.get("max_format_retries", 0) or 0)
@@ -3070,20 +3112,15 @@ def run_agent(
 
     while True:
         turns += 1
+        hooks.emit("turn_start", {"turn": turns, "messages": messages})
         if turns > MAX_TURNS * 3:
             # Hard cap: prevent infinite loops even with format retries
-            log_event("agent_abort", {"reason": "hard_turn_limit", "turns": turns})
+            logging_hook.log_event("agent_abort", {"reason": "hard_turn_limit", "turns": turns})
             return "error: hard turn limit reached", messages
         if (turns - format_retry_turns) > MAX_TURNS:
-            summary = {
-                "tool_calls_total": tool_calls_total,
-                "tool_errors_total": tool_errors_total,
-                "tool_call_counts": tool_call_counts,
-                "tool_error_counts": tool_error_counts,
-                "analysis_retries": analysis_retries,
-            }
+            summary = _metrics.summary()
             LAST_RUN_SUMMARY = summary
-            log_event("agent_abort", {"reason": "max_turns", "turns": turns, **summary})
+            logging_hook.log_event("agent_abort", {"reason": "max_turns", "turns": turns, **summary})
             return "error: max turns reached", messages
 
         request_messages = messages
@@ -3096,7 +3133,7 @@ def run_agent(
             enforced_tool_choice_display = TOOL_DISPLAY_MAP.get(enforced_tool_choice, enforced_tool_choice)
             current_overrides = dict(request_overrides)
             current_overrides["tool_choice"] = {"type": "function", "function": {"name": enforced_tool_choice_display}}
-            log_event("forced_tool_choice", {"turn": turns, "tool": enforced_tool_choice})
+            logging_hook.log_event("forced_tool_choice", {"turn": turns, "tool": enforced_tool_choice})
 
         tool_choice_required = is_tool_choice_required(current_overrides.get("tool_choice")) or base_tool_choice_required
 
@@ -3104,7 +3141,7 @@ def run_agent(
         last_request_id = response.get("request_id")
 
         if response.get("error"):
-            log_event("api_error", {"turn": turns, "error": response["error"]})
+            logging_hook.log_event("api_error", {"turn": turns, "error": response["error"]})
             return f"error: {response['error']}", messages
 
         usage_info = format_usage_info(response.get("usage"), response.get("timings"))
@@ -3121,8 +3158,8 @@ def run_agent(
         content, was_analysis = normalize_analysis_only(raw_content)
         content = content or ""
         if was_analysis:
-            log_event("analysis_artifact_normalized", {"turn": turns, "original_len": len(raw_content)})
-            analysis_retries += 1
+            logging_hook.log_event("analysis_artifact_normalized", {"turn": turns, "original_len": len(raw_content)})
+            _metrics.analysis_retries += 1
         tool_calls = message.get("tool_calls", []) or []
         thinking = message.get("thinking")
         if not thinking:
@@ -3131,12 +3168,12 @@ def run_agent(
         if thinking and native_thinking:
             t = str(thinking).strip()
             if t:
-                log_event("thinking_captured", {"turn": turns, "chars": len(t)})
+                logging_hook.log_event("thinking_captured", {"turn": turns, "chars": len(t)})
 
         tool_names = [tc.get("function", {}).get("name", "") for tc in tool_calls]
         resolved_tool_names = [resolve_tool_name(n) for n in tool_names]
         tool_call_ids = [tc.get("id", "") for tc in tool_calls]
-        log_event("response", {
+        logging_hook.log_event("response", {
             "turn": turns,
             "tool_calls": tool_names,
             "tool_calls_resolved": resolved_tool_names,
@@ -3162,7 +3199,7 @@ def run_agent(
                         f"FORMAT ERROR (attempt {format_retries}/{max_format_retries}): "
                         f"TOOL CALL REQUIRED: {display_name}. Output ONLY that tool call (no text, no other tools)."
                     })
-                    log_event("format_retry", {
+                    logging_hook.log_event("format_retry", {
                         "turn": turns,
                         "reason": "forced_tool_choice_mismatch",
                         "expected_tool": enforced_tool_choice,
@@ -3172,9 +3209,6 @@ def run_agent(
                     continue
                 return "error: forced tool choice mismatch", messages
             forced_tool_choice = None
-
-        if tool_calls:
-            tool_calls_total += len(tool_calls)
 
         # No tool calls -> maybe final content / maybe retry
         if not tool_calls:
@@ -3186,14 +3220,14 @@ def run_agent(
                         f"FORMAT ERROR (attempt {format_retries}/{max_format_retries}): "
                         "analysis-only artifact detected; output final content or a tool call."
                     })
-                    log_event("format_retry", {"turn": turns, "reason": "analysis_only_no_tool_calls"})
+                    logging_hook.log_event("format_retry", {"turn": turns, "reason": "analysis_only_no_tool_calls"})
                     format_retry_turns += 1
                     continue
                 # Exhausted retries — return error, never treat analysis as final content
-                log_event("analysis_only_exhausted", {"turn": turns, "retries": format_retries})
+                logging_hook.log_event("analysis_only_exhausted", {"turn": turns, "retries": format_retries})
                 return "error: analysis-only output after retries exhausted", messages
 
-            if min_tool_calls and tool_calls_total < min_tool_calls:
+            if min_tool_calls and _metrics.tool_calls_total < min_tool_calls:
                 if format_retries < max_format_retries:
                     format_retries += 1
                     if tool_choice_required:
@@ -3210,7 +3244,7 @@ def run_agent(
                             f"FORMAT ERROR (attempt {format_retries}/{max_format_retries}): "
                             "Use at least one tool call before finishing."
                         })
-                    log_event("format_retry", {"turn": turns, "reason": "min_tool_calls_not_met"})
+                    logging_hook.log_event("format_retry", {"turn": turns, "reason": "min_tool_calls_not_met"})
                     format_retry_turns += 1
                     continue
 
@@ -3222,15 +3256,18 @@ def run_agent(
                         display_name = display_tool_name(tn)
                         tool_call = {"id": tool_call_id, "type": "function", "function": {"name": display_name, "arguments": json.dumps(ta)}}
                         resolved_name, resolved_args, result, response_name = process_tool_call(tools_dict, tool_call)
-                        if is_tool_error(resolved_name, result):
-                            tool_errors_total += 1
+                        error_detected = is_tool_error(resolved_name, result)
+                        if error_detected:
+                            _metrics.tool_errors_total += 1
+                            _metrics.tool_error_counts[resolved_name] = _metrics.tool_error_counts.get(resolved_name, 0) + 1
                         elif is_write_tool(resolved_name):
                             if _did_tool_make_change(resolved_name, result):
                                 code_change_made = True
+                        _metrics.tool_calls_total += 1
+                        _metrics.tool_call_counts[resolved_name] = _metrics.tool_call_counts.get(resolved_name, 0) + 1
                         messages.append({"role": "assistant", "content": "", "tool_calls": [tool_call]})
                         messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": display_name, "content": result})
-                        tool_calls_total += 1
-                        log_event("forced_tool_call", {"turn": turns, "tool": resolved_name, "tool_display": display_name})
+                        logging_hook.log_event("forced_tool_call", {"turn": turns, "tool": resolved_name, "tool_display": display_name})
                         continue
 
                 return "error: minimum tool calls not met", messages
@@ -3248,7 +3285,7 @@ def run_agent(
                         f"FORMAT ERROR (attempt {code_change_retries}/{max_format_retries}): "
                         f"TOOL CALL REQUIRED: {tools_str}. Output ONLY that tool call (no text, no other tools)."
                     })
-                    log_event("format_retry", {"turn": turns, "reason": "code_change_required"})
+                    logging_hook.log_event("format_retry", {"turn": turns, "reason": "code_change_required"})
                     format_retry_turns += 1
                     continue
                 return "error: code change required", messages
@@ -3256,59 +3293,27 @@ def run_agent(
             # Final content
             if content:
                 print(f"\n{CYAN}⏺{RESET} {content}")
+                hooks.emit("response_content", {"content": content, "turn": turns})
 
             messages.append(message)
-            summary = {
-                "tool_calls_total": tool_calls_total,
-                "tool_errors_total": tool_errors_total,
-                "tool_call_counts": tool_call_counts,
-                "tool_error_counts": tool_error_counts,
-                "analysis_retries": analysis_retries,
-            }
+            summary = _metrics.summary()
             LAST_RUN_SUMMARY = summary
-            log_event("agent_done", {"turns": turns, **summary, "message_summary": summarize_messages(messages)})
-            # Dump full conversation to separate files
-            if LOG_PATH:
-                base_path = LOG_PATH.rsplit(".", 1)[0]
-                full_conv = [{"role": "system", "content": system_prompt}] + list(messages)
-                # 1) Raw JSON (.raw.json)
-                raw_path = base_path + ".raw.json"
-                try:
-                    with open(raw_path, "w", encoding="utf-8") as rf:
-                        json.dump(full_conv, rf, indent=2, ensure_ascii=False)
-                except Exception:
-                    pass
-                # 2) Pretty human-readable (.log)
-                pretty_path = base_path + ".log"
-                try:
-                    with open(pretty_path, "w", encoding="utf-8") as cf:
-                        for i, msg in enumerate(full_conv):
-                            role = msg.get("role", "?")
-                            cf.write(f"{'='*60}\n")
-                            cf.write(f"[{i}] {role.upper()}")
-                            if msg.get("tool_call_id"):
-                                cf.write(f"  (tool_call_id: {msg['tool_call_id']})")
-                            cf.write(f"\n{'='*60}\n\n")
-                            for tk in ("thinking", "reasoning_content"):
-                                if msg.get(tk):
-                                    cf.write(f"--- THINKING ---\n{msg[tk]}\n--- /THINKING ---\n\n")
-                            content_val = msg.get("content")
-                            if content_val:
-                                cf.write(f"{content_val}\n\n")
-                            for tc in msg.get("tool_calls") or []:
-                                fn = tc.get("function", {})
-                                cf.write(f">>> TOOL CALL: {fn.get('name', '?')}  (id: {tc.get('id', '?')})\n")
-                                args_str = fn.get("arguments", "")
-                                try:
-                                    args_obj = json.loads(args_str) if isinstance(args_str, str) else args_str
-                                    cf.write(json.dumps(args_obj, indent=2, ensure_ascii=False))
-                                except (json.JSONDecodeError, TypeError):
-                                    cf.write(str(args_str))
-                                cf.write(f"\n\n")
-                        cf.write(f"{'='*60}\nEND ({len(full_conv)} messages)\n{'='*60}\n")
-                except Exception:
-                    pass
-                log_event("conversation_saved", {"raw": raw_path, "pretty": pretty_path, "message_count": len(full_conv)})
+            logging_hook.log_event("agent_done", {"turns": turns, **summary, "message_summary": summarize_messages(messages)})
+
+            # Hook: agent_end — triggers conversation dump and other end-of-run hooks
+            end_data = hooks.emit("agent_end", {
+                "summary": summary,
+                "messages": messages,
+                "content": content,
+                "turns": turns,
+                "log_path": logging_hook.get_log_path(),
+                "system_prompt": system_prompt,
+            })
+            # Log conversation dump result if the hook produced one
+            dump_info = end_data.get("conversation_dump")
+            if dump_info:
+                logging_hook.log_event("conversation_saved", dump_info)
+
             return content, messages
 
         # Tool calls path
@@ -3325,9 +3330,15 @@ def run_agent(
         feedback_text = None
         feedback_reason = None
         for tc in tool_calls:
-            resolved_name, tool_args, result, response_name = process_tool_call(tools_dict, tc)
-            tool_call_counts[resolved_name] = tool_call_counts.get(resolved_name, 0) + 1
+            # Hook: tool_before (mutable — hooks can modify tool_args)
             tc_display_name = (tc.get("function") or {}).get("name") or ""
+            before_data = hooks.emit("tool_before", {
+                "tool_name": resolve_tool_name(tc_display_name),
+                "tool_args": (tc.get("function") or {}).get("arguments", "{}"),
+                "tool_call": tc,
+            })
+
+            resolved_name, tool_args, result, response_name = process_tool_call(tools_dict, tc)
 
             # Pretty print
             arg_preview = ""
@@ -3343,372 +3354,35 @@ def run_agent(
                 if isinstance(patch_text, str):
                     path_value = extract_patch_file(patch_text)
 
-            if is_tool_error(resolved_name, result):
-                tool_errors_total += 1
-                tool_error_counts[resolved_name] = tool_error_counts.get(resolved_name, 0) + 1
-                result_text = result if isinstance(result, str) else ""
-                if resolved_name == "apply_patch" and "patch context not found" in result_text:
-                    if path_value:
-                        target = f"the SAME path you attempted to patch: {path_value}"
-                        patch_fail_count[path_value] = patch_fail_count.get(path_value, 0) + 1
-                        fail_count = patch_fail_count[path_value]
-                    else:
-                        target = "the file named in the patch header line: '*** Update File: <path>'"
-                        fail_count = 0
-                    patch_tool = display_tool_name("apply_patch")
-                    read_tool = display_tool_name("read")
-                    edit_tool = display_tool_name("edit")
-                    write_tool = display_tool_name("write")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "patch_context_not_found",
-                        (
-                            f"FORMAT ERROR: {patch_tool} failed: patch context not found.\n"
-                            f"ACTION: Call {read_tool}(path) for {target} (use {read_tool}, NOT grep/search), then retry {patch_tool} using the CURRENT content with exact context lines.\n"
-                            "Do NOT repeat the same patch."
-                        ),
-                        {"target": target},
-                    )
-                    if fail_count >= 2:
-                        feedback_text += (
-                            f"\nSECOND FAILURE on same file ({path_value}): "
-                            f"STOP patching; re-read and switch to {edit_tool} or {write_tool}."
-                        )
-                    feedback_reason = "patch_context_not_found"
-                elif resolved_name == "apply_patch" and "patch context not unique" in result_text:
-                    if path_value:
-                        target = f"the SAME path you attempted to patch: {path_value}"
-                    else:
-                        target = "the file named in the patch header line: '*** Update File: <path>'"
-                    patch_tool = display_tool_name("apply_patch")
-                    read_tool = display_tool_name("read")
-                    edit_tool = display_tool_name("edit")
-                    write_tool = display_tool_name("write")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "patch_context_not_unique",
-                        (
-                            f"FORMAT ERROR: {patch_tool} failed: patch context not unique.\n"
-                            f"ACTION: Call {read_tool}(path) for {target}, then retry {patch_tool} with MORE unique context lines, "
-                            f"OR switch to {edit_tool} / {write_tool} if the file is small."
-                        ),
-                        {"target": target},
-                    )
-                    feedback_reason = "patch_context_not_unique"
-                elif resolved_name == "apply_patch" and "must read" in result_text and "before patching" in result_text:
-                    if path_value:
-                        target = f"the SAME path you attempted to patch: {path_value}"
-                    else:
-                        target = "the file named in the patch header line: '*** Update File: <path>'"
-                    patch_tool = display_tool_name("apply_patch")
-                    read_tool = display_tool_name("read")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "must_read_before_patching",
-                        (
-                            f"FORMAT ERROR: {patch_tool} requires the file to be read first.\n"
-                            f"ACTION: Call {read_tool}(path) for {target} (use {read_tool}, NOT grep/search), then retry {patch_tool}."
-                        ),
-                        {"target": target},
-                    )
-                    feedback_reason = "must_read_before_patching"
-                elif resolved_name == "apply_patch" and "invalid patch format" in result_text:
-                    patch_tool = display_tool_name("apply_patch")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "invalid_patch_format",
-                        (
-                            f"FORMAT ERROR: {patch_tool} failed: invalid patch format.\n"
-                            f"ACTION: Provide a COMPLETE patch with *** Begin Patch and *** End Patch markers and valid context lines. "
-                            f"Re-read the target file and retry {patch_tool}."
-                        ),
-                    )
-                    feedback_reason = "invalid_patch_format"
-                elif resolved_name == "apply_patch" and "unexpected patch line" in result_text:
-                    patch_tool = display_tool_name("apply_patch")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "unexpected_patch_line",
-                        (
-                            f"FORMAT ERROR: {patch_tool} failed: unexpected patch line.\n"
-                            f"ACTION: Ensure each line starts with ' ', '+', or '-' and include a valid @@ context header. "
-                            f"Re-read the target file and retry {patch_tool}."
-                        ),
-                    )
-                    feedback_reason = "unexpected_patch_line"
-                elif resolved_name == "apply_patch" and "invalid add line" in result_text:
-                    patch_tool = display_tool_name("apply_patch")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "invalid_add_line",
-                        (
-                            f"FORMAT ERROR: {patch_tool} failed: invalid add line.\n"
-                            f"ACTION: Lines being added must start with '+'. "
-                            f"Re-read the target file and retry {patch_tool}."
-                        ),
-                    )
-                    feedback_reason = "invalid_add_line"
-                elif resolved_name == "edit" and "must read" in result_text and "before editing" in result_text:
-                    if path_value:
-                        target = f"the SAME path you attempted to edit: {path_value}"
-                    else:
-                        target = "the SAME path you attempted to edit (use the 'path' argument from your edit tool call)"
-                    edit_tool = display_tool_name("edit")
-                    read_tool = display_tool_name("read")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "must_read_before_editing",
-                        (
-                            f"FORMAT ERROR: {edit_tool} requires the file to be read first.\n"
-                            f"ACTION: Call {read_tool}(path) for {target} (use {read_tool}, NOT grep/search), then retry {edit_tool}."
-                        ),
-                        {"target": target},
-                    )
-                    feedback_reason = "must_read_before_editing"
-                elif resolved_name == "edit" and "old_string not found" in result_text:
-                    if path_value:
-                        target = f"the SAME path you attempted to edit: {path_value}"
-                    else:
-                        target = "the SAME path you attempted to edit (use the 'path' argument from your edit tool call)"
-                    edit_tool = display_tool_name("edit")
-                    read_tool = display_tool_name("read")
-                    patch_tool = display_tool_name("apply_patch")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "old_string_not_found",
-                        (
-                            f"FORMAT ERROR: {edit_tool} failed: old_string not found.\n"
-                            f"ACTION: Call {read_tool}(path) for {target} (use {read_tool}, NOT grep/search), then retry with an EXACT substring (including whitespace), "
-                            f"OR switch to {patch_tool} with exact context."
-                        ),
-                        {"target": target},
-                    )
-                    feedback_reason = "old_string_not_found"
-                elif resolved_name == "edit" and "must be unique" in result_text and "all=true" in result_text:
-                    if path_value:
-                        target = f"the SAME path you attempted to edit: {path_value}"
-                    else:
-                        target = "the SAME path you attempted to edit (use the 'path' argument from your edit tool call)"
-                    edit_tool = display_tool_name("edit")
-                    read_tool = display_tool_name("read")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "old_string_not_unique",
-                        (
-                            f"FORMAT ERROR: {edit_tool} failed: old_string is not unique.\n"
-                            f"ACTION: Call {read_tool}(path) for {target} (use {read_tool}, NOT grep/search), then retry with an exact unique substring, "
-                            f"OR set all=true if you intend to replace all occurrences."
-                        ),
-                        {"target": target},
-                    )
-                    feedback_reason = "old_string_not_unique"
-                elif resolved_name == "edit" and "no changes" in result_text and "old_string equals new_string" in result_text:
-                    if path_value:
-                        target = f"the SAME path you attempted to edit: {path_value}"
-                    else:
-                        target = "the SAME path you attempted to edit (use the 'path' argument from your edit tool call)"
-                    edit_tool = display_tool_name("edit")
-                    read_tool = display_tool_name("read")
-                    write_tool = display_tool_name("write")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "old_equals_new",
-                        (
-                            f"ERROR: {edit_tool} called with old='...' identical to new='...' - no change would occur.\n"
-                            f"This usually means you want to MODIFY the code, not copy it unchanged.\n"
-                            f"ACTION:\n"
-                            f"1. Re-read the file with {read_tool}({target})\n"
-                            f"2. Identify the EXACT text you want to CHANGE (old)\n"
-                            f"3. Write the MODIFIED version (new) - it must be DIFFERENT from old\n"
-                            f"4. If the file already has correct content, the task may be complete - verify and move on.\n"
-                            f"TIP: For small files, consider using {write_tool} to rewrite the entire file."
-                        ),
-                        {"target": target},
-                    )
-                    feedback_reason = "old_equals_new"
-                elif resolved_name == "apply_patch" and "no changes" in result_text and "no-op" in result_text:
-                    patch_tool = display_tool_name("apply_patch")
-                    read_tool = display_tool_name("read")
-                    edit_tool = display_tool_name("edit")
-                    write_tool = display_tool_name("write")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "patch_noop",
-                        (
-                            f"FORMAT ERROR: {patch_tool} applied but made NO changes to the file (no-op).\n"
-                            f"The file content is identical before and after your patch.\n"
-                            f"ACTION:\n"
-                            f"1. Call {read_tool}(path) to see current content\n"
-                            f"2. Create a NEW {patch_tool} that actually changes content\n"
-                            f"3. Or switch to {edit_tool}/{write_tool}\n"
-                            f"Do NOT repeat the same patch."
-                        ),
-                    )
-                    feedback_reason = "patch_noop"
-                elif resolved_name == "apply_patch" and "repeated patch detected" in result_text:
-                    patch_tool = display_tool_name("apply_patch")
-                    read_tool = display_tool_name("read")
-                    edit_tool = display_tool_name("edit")
-                    write_tool = display_tool_name("write")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "patch_repeated",
-                        (
-                            f"FORMAT ERROR: You submitted the exact same patch text again.\n"
-                            f"This will loop forever.\n"
-                            f"ACTION: {read_tool}(path), then create a DIFFERENT {patch_tool} "
-                            f"or use {edit_tool}/{write_tool}."
-                        ),
-                    )
-                    feedback_reason = "patch_repeated"
-                elif resolved_name in ("write", "write_file") and "no changes" in result_text:
-                    write_tool = display_tool_name("write")
-                    read_tool = display_tool_name("read")
-                    edit_tool = display_tool_name("edit")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "write_noop",
-                        (
-                            f"FORMAT ERROR: {write_tool} wrote identical content (no-op).\n"
-                            f"ACTION: {read_tool}(path) then {write_tool} with DIFFERENT content, "
-                            f"or use {edit_tool} to change a specific part."
-                        ),
-                    )
-                    feedback_reason = "write_noop"
-                elif resolved_name == "read" and "Is a directory" in result_text:
-                    read_tool = display_tool_name("read")
-                    ls_tool = display_tool_name("ls")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "read_is_directory",
-                        (
-                            f"FORMAT ERROR: {read_tool} failed: path is a directory.\n"
-                            f"ACTION: Use {ls_tool}(path) to list files, then call {read_tool} on a file path."
-                        ),
-                    )
-                    feedback_reason = "read_is_directory"
-                elif resolved_name == "read" and "File not found" in result_text:
-                    read_tool = display_tool_name("read")
-                    ls_tool = display_tool_name("ls")
-                    glob_tool = display_tool_name("glob")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "read_file_not_found",
-                        (
-                            f"FORMAT ERROR: {read_tool} failed: file not found.\n"
-                            f"ACTION: Use {ls_tool}(path) or {glob_tool}(pat, path) to locate the correct file, then call {read_tool} with the valid path."
-                        ),
-                    )
-                    feedback_reason = "read_file_not_found"
-                elif resolved_name in {"search", "grep"} and "invalid regex" in result_text:
-                    search_tool = display_tool_name(resolved_name)
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "invalid_regex",
-                        (
-                            f"FORMAT ERROR: {search_tool} failed: invalid regex.\n"
-                            f"ACTION: If you want literal text, set literal_text=true. Otherwise escape regex metacharacters and retry {search_tool}."
-                        ),
-                    )
-                    feedback_reason = "invalid_regex"
-                elif resolved_name in {"search", "grep"} and "path does not exist" in result_text:
-                    search_tool = display_tool_name(resolved_name)
-                    ls_tool = display_tool_name("ls")
-                    glob_tool = display_tool_name("glob")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "search_path_missing",
-                        (
-                            f"FORMAT ERROR: {search_tool} failed: path does not exist.\n"
-                            f"ACTION: Use {ls_tool}(path) or {glob_tool}(pat, path) to find the correct path, then retry {search_tool}."
-                        ),
-                    )
-                    feedback_reason = "search_path_missing"
-                elif resolved_name == "apply_patch" and "File not found" in result_text:
-                    patch_tool = display_tool_name("apply_patch")
-                    ls_tool = display_tool_name("ls")
-                    glob_tool = display_tool_name("glob")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "patch_file_not_found",
-                        (
-                            f"FORMAT ERROR: {patch_tool} failed: file not found in patch header.\n"
-                            f"ACTION: Use {ls_tool}(path) or {glob_tool}(pat, path) to locate the correct file path, then retry {patch_tool} with the correct '*** Update File:' path."
-                        ),
-                    )
-                    feedback_reason = "patch_file_not_found"
-                elif resolved_name == "ls" and ("directory not found" in result_text or "File not found" in result_text):
-                    ls_tool = display_tool_name("ls")
-                    glob_tool = display_tool_name("glob")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "ls_path_missing",
-                        (
-                            f"FORMAT ERROR: {ls_tool} failed: path does not exist.\n"
-                            f"ACTION: Use {ls_tool} with a valid path (e.g. '.') or use {glob_tool}(pat, path) to discover files."
-                        ),
-                    )
-                    feedback_reason = "ls_path_missing"
-                elif resolved_name == "glob" and "path does not exist" in result_text:
-                    glob_tool = display_tool_name("glob")
-                    ls_tool = display_tool_name("ls")
-                    feedback_text = build_feedback_text(
-                        tools_dict,
-                        TOOL_DISPLAY_MAP,
-                        resolved_name,
-                        "glob_path_missing",
-                        (
-                            f"FORMAT ERROR: {glob_tool} failed: path does not exist.\n"
-                            f"ACTION: Use {ls_tool}(path) to verify directories, then retry {glob_tool} with a valid path."
-                        ),
-                    )
-                    feedback_reason = "glob_path_missing"
-            elif resolved_name in ("apply_patch", "patch_files") and path_value:
-                patch_fail_count.pop(path_value, None)
-                if _did_tool_make_change(resolved_name, result):
-                    code_change_made = True
-            elif is_write_tool(resolved_name):
-                if _did_tool_make_change(resolved_name, result):
-                    code_change_made = True
-            log_event("tool_result", {
+            error_detected = is_tool_error(resolved_name, result)
+
+            # Hook: tool_after — metrics_hook counts calls/errors, feedback_hook sets feedback
+            after_data = hooks.emit("tool_after", {
+                "tool_name": resolved_name,
+                "tool_args": tool_args,
+                "result": result,
+                "is_error": error_detected,
+                "path_value": path_value,
+                "patch_fail_count": _metrics.get_patch_fail_count(path_value) if path_value else 0,
+                "tool_call": tc,
+                "turn": turns,
+            })
+
+            # Check if feedback hook set feedback text
+            if after_data.get("feedback_text") and not feedback_text:
+                feedback_text = after_data["feedback_text"]
+                feedback_reason = after_data.get("feedback_reason")
+
+            if not error_detected:
+                if resolved_name in ("apply_patch", "patch_files") and path_value:
+                    _metrics.clear_patch_fail(path_value)
+                    if _did_tool_make_change(resolved_name, result):
+                        code_change_made = True
+                elif is_write_tool(resolved_name):
+                    if _did_tool_make_change(resolved_name, result):
+                        code_change_made = True
+
+            logging_hook.log_event("tool_result", {
                 "turn": turns,
                 "tool": tc_display_name or response_name or resolved_name,
                 "tool_resolved": resolved_name,
@@ -3737,12 +3411,21 @@ def run_agent(
         if feedback_text:
             attempt_num = None
             if feedback_reason:
-                feedback_counts[feedback_reason] += 1
-                attempt_num = feedback_counts[feedback_reason]
+                _metrics.feedback_counts[feedback_reason] += 1
+                attempt_num = _metrics.feedback_counts[feedback_reason]
                 lines = feedback_text.splitlines()
                 if lines:
                     lines[0] = f"{lines[0]} (attempt {attempt_num})"
                     feedback_text = "\n".join(lines)
+            # Hook: tool_feedback (mutable — hooks can modify feedback_text)
+            fb_data = hooks.emit("tool_feedback", {
+                "tool_name": feedback_reason or "tool_error_feedback",
+                "reason": feedback_reason,
+                "feedback_text": feedback_text,
+                "turn": turns,
+                "attempt": attempt_num,
+            })
+            feedback_text = fb_data.get("feedback_text", feedback_text)
             _append_feedback(
                 messages,
                 turns,
@@ -3751,6 +3434,8 @@ def run_agent(
                 feedback_reason or "tool_error_feedback",
                 attempt=attempt_num,
             )
+            # Hook: turn_end
+            hooks.emit("turn_end", {"turn": turns, "tool_count": len(tool_calls), "errors": _metrics.tool_errors_total})
             continue
 
 
@@ -3770,7 +3455,7 @@ def run_once(prompt: str, system_prompt: str, tools_dict: ToolsDict) -> None:
     else:
         init_new_session(AGENT_NAME or "agent")
 
-    log_event("run_start", {
+    logging_hook.log_event("run_start", {
         "prompt_len": len(prompt or ""),
         "prompt_preview": (prompt or "")[:200],
         "continue_session": continue_mode,
@@ -3782,7 +3467,7 @@ def run_once(prompt: str, system_prompt: str, tools_dict: ToolsDict) -> None:
     save_session(AGENT_NAME or "agent", messages, MODEL)
 
     global LAST_RUN_SUMMARY
-    log_event("run_end", LAST_RUN_SUMMARY or {})
+    logging_hook.log_event("run_end", LAST_RUN_SUMMARY or {})
 
 
 # ---------------------------
