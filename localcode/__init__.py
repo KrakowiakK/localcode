@@ -25,6 +25,10 @@ def __setattr__(name, value):
         globals()["_agent"] = value
         return
     setattr(_load_agent(), name, value)
+    # Sync SANDBOX_ROOT to _state (single source of truth for tool handlers)
+    if name == "SANDBOX_ROOT":
+        from localcode.tool_handlers import _state
+        _state.SANDBOX_ROOT = value
 
 
 def __dir__():
