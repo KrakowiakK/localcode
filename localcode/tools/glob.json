@@ -1,0 +1,23 @@
+{
+  "name": "glob",
+  "aliases": ["find_files"],
+  "category": "read",
+  "description": "Find files by glob pattern. Uses ripgrep if available. Results are limited to 100 paths.\n\nPATH RULES:\n- Use output paths verbatim; do not invent paths.\n- Use {{tool:glob}} when a file path is uncertain, then {{tool:read}} the exact path.\n- If you already know the exact file path, skip {{tool:glob}}.\n\nDefaults:\n- pat defaults to \"*\"\n- path defaults to \".\"\n\nExamples:\n- {{tool:glob}}({\"pat\": \"*.js\", \"path\": \"src\"}) → JS files in src\n- {{tool:glob}}({\"pat\": \"**/*.test.js\", \"path\": \".\"}) → all test files recursively",
+  "feedback": {
+    "glob_path_missing": "FORMAT ERROR: {{tool:glob}} failed: path does not exist.\nACTION: Use {{tool:ls}}(path) to verify directories, then retry {{tool:glob}} with a valid path."
+  },
+  "additionalProperties": false,
+  "parameters": {
+    "pat": {
+      "type": "string",
+      "optional": true,
+      "default": "*"
+    },
+    "path": {
+      "type": "string",
+      "optional": true,
+      "default": "."
+    }
+  },
+  "handler": "glob"
+}

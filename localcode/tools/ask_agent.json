@@ -1,0 +1,40 @@
+{
+  "name": "ask_agent",
+  "aliases": ["askAgent", "ask_architect", "consult"],
+  "category": "agent",
+  "description": "Consult the code-architect for implementation guidance. The architect analyzes code/tests and provides difficulty ranking, key insights, and hints - NOT code.\n\nExamples:\n- {{tool:ask_agent}}({\"prompt\": \"What are the tricky parts of this implementation?\", \"files\": [\"test.spec.js\", \"source.js\"]})\n- {{tool:ask_agent}}({\"prompt\": \"Analyze these tests and identify edge cases\", \"files\": [\"test.spec.js\"]})",
+  "additionalProperties": false,
+  "parameters": {
+    "prompt": {
+      "type": "string",
+      "description": "The task or question for the agent"
+    },
+    "files": {
+      "type": "array",
+      "optional": true,
+      "description": "File paths to include as context. Contents will be shown to the agent."
+    },
+    "agent": {
+      "type": "string",
+      "optional": true,
+      "default": "code-architect",
+      "description": "Agent to call. Default: code-architect"
+    },
+    "timeout": {
+      "type": "integer",
+      "optional": true,
+      "default": 300,
+      "description": "Timeout in seconds (default: 300)"
+    }
+  },
+  "handler": "ask_agent",
+  "model_call": {
+    "mode": "subprocess",
+    "default_agent": "code-architect",
+    "default_timeout": 300,
+    "read_files": true,
+    "strip_ansi": true,
+    "strip_thinking": true,
+    "strip_status_lines": true
+  }
+}

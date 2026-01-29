@@ -1,0 +1,18 @@
+{
+  "name": "ls",
+  "aliases": ["list_dir", "print_tree"],
+  "category": "read",
+  "description": "List directory contents. Use a specific path; use {{tool:glob}} for recursive search.\n\nPATH RULES:\n- Use output paths verbatim; do not invent paths.\n- If you see a directory, call {{tool:ls}} on it to drill down before reading files.\n- If the prompt already provides exact file paths, you can skip {{tool:ls}}.\n- {{tool:ls}} is for directories; use {{tool:read}} to open files.\n\nDefaults:\n- path defaults to \".\"\n\nExamples:\n- {{tool:ls}}({}) → list current directory\n- {{tool:ls}}({\"path\": \"src\"}) → list src directory",
+  "feedback": {
+    "ls_path_missing": "FORMAT ERROR: {{tool:ls}} failed: path does not exist.\nACTION: Use {{tool:ls}} with a valid path (e.g. '.') or use {{tool:glob}}(pat, path) to discover files."
+  },
+  "additionalProperties": false,
+  "parameters": {
+    "path": {
+      "type": "string",
+      "optional": true,
+      "default": "."
+    }
+  },
+  "handler": "ls"
+}

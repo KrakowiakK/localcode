@@ -1,0 +1,51 @@
+{
+  "name": "gguf/qwen3-next-80b",
+  "description": "Qwen3 Next 80B (A3B active) via llama.cpp (GGUF) - standardowy JSON tool calling.",
+  "prompt": "prompts/qwen3.txt",
+  "model": "qwen3-next-80b",
+  "url": "http://localhost:1235/v1/chat/completions",
+  "temperature": 0.7,
+  "top_p": 0.8,
+  "top_k": 20,
+  "min_p": 0,
+  "presence_penalty": 1.0,
+  "max_tokens": 16000,
+  "tool_choice": "auto",
+  "cache": false,
+  "think": false,
+  "tool_name_style": "canonical",
+  "auto_tool_call_on_failure": true,
+  "require_code_change": true,
+  "thinking_visibility": "show",
+  "min_tool_calls": 1,
+  "max_format_retries": 2,
+  "max_batch_tool_calls": 2,
+  "tools": [
+    "list_dir",
+    "read_file",
+    "write_file",
+    "replace_in_file",
+    "patch_files",
+    "find_files",
+    "search_text",
+    "think"
+  ],
+  "native_thinking": false,
+  "server_config": {
+    "model_path": "~/.lmstudio/models/unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf",
+    "context_window": 131072,
+    "extra_args": [
+      "--jinja",
+      "--no-context-shift",
+      "--cache-type-k",
+      "f16",
+      "--cache-type-v",
+      "f16",
+      "--ubatch-size",
+      "2048",
+      "--chat-template-kwargs",
+      "{\"enable_thinking\":false}"
+    ],
+    "hf_model": "hf://unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf"
+  }
+}

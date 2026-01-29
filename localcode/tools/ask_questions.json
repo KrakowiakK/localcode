@@ -1,0 +1,26 @@
+{
+  "name": "ask_questions",
+  "aliases": ["batch_think", "multi_question"],
+  "category": "reasoning",
+  "description": "Ask 2-4 carefully chosen questions in parallel. Each question is answered independently with full conversation history. Maximum 4 questions.\n\nBefore calling: think about what you truly need to know. Each question should target a distinct unknown — avoid overlapping or vague questions. Good questions are specific and actionable.\n\nExamples:\n- {{tool:ask_questions}}({\"questions\": [\"What edge cases do the tests check for?\", \"What data structure best fits this problem?\"]})\n- {{tool:ask_questions}}({\"questions\": [\"How should setValue propagate changes to dependents?\", \"What is the expected callback behavior on value change?\"]})",
+  "additionalProperties": true,
+  "parameters": {
+    "questions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of questions to answer in parallel. Each gets full conversation history."
+    }
+  },
+  "required": ["questions"],
+  "handler": "ask_questions",
+  "model_call": {
+    "mode": "self_batch",
+    "include_history": true,
+    "temperature": 0.3,
+    "max_tokens": 2000,
+    "timeout": 120,
+    "max_concurrent": 4,
+    "max_questions": 4,
+    "system_prompt_file": "prompts/ask_questions.txt"
+  }
+}

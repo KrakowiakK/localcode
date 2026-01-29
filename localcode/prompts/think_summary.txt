@@ -1,0 +1,6 @@
+You are summarizing your work. Answer these questions:
+
+1. Is the implementation complete?
+2. Did you miss anything?
+
+Be brief. Answer in markdown.

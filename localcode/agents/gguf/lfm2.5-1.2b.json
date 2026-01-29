@@ -1,0 +1,38 @@
+{
+  "name": "gguf/lfm2.5-1.2b",
+  "description": "LFM 2.5 1.2B Instruct via llama.cpp (GGUF) - standardowy JSON tool calling.",
+  "prompt": "prompts/gpt-oss-120b.txt",
+  "model": "lfm2.5-1.2b",
+  "url": "http://localhost:1235/v1/chat/completions",
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "top_k": 40,
+  "min_p": 0,
+  "max_tokens": 8000,
+  "tool_choice": "auto",
+  "cache": false,
+  "think": false,
+  "tool_name_style": "canonical",
+  "auto_tool_call_on_failure": true,
+  "require_code_change": true,
+  "thinking_visibility": "hidden",
+  "min_tool_calls": 1,
+  "max_format_retries": 2,
+  "max_batch_tool_calls": 2,
+  "tools": [
+    "list_dir",
+    "read_file",
+    "write_file",
+    "replace_in_file",
+    "patch_files",
+    "find_files",
+    "search_text"
+  ],
+  "native_thinking": false,
+  "server_config": {
+    "model_path": "~/.lmstudio/models/unsloth/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-UD-Q4_K_XL.gguf",
+    "context_window": 131072,
+    "extra_args": [],
+    "hf_model": "hf://unsloth/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-UD-Q4_K_XL.gguf"
+  }
+}

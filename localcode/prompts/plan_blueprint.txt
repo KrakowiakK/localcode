@@ -1,0 +1,18 @@
+Create an IMPLEMENTATION BLUEPRINT. Be extremely specific - this will guide your code.
+
+STEP 1 - SIGNATURES:
+List all classes/functions with their exact signatures.
+
+STEP 2 - TEST MAPPING:
+For each test: test name → method called → expected result.
+
+STEP 3 - CORE LOGIC:
+Write pseudocode for the main functionality.
+
+STEP 4 - STATE:
+What does each class store? How do they connect?
+
+STEP 5 - GOTCHAS:
+What could go wrong?
+
+FORMAT: Markdown only, no JSON.

@@ -1,0 +1,26 @@
+{
+  "name": "apply_patch",
+  "aliases": [
+    "patch_files",
+    "patch_file"
+  ],
+  "category": "write",
+  "description": "Apply a patch to one or more files in a single operation.\n\nFORMAT:\n*** Begin Patch\n*** Update File: path/to/file\n@@ SINGLE_LINE_FROM_FILE (copy-paste verbatim from read output)\n context line (space prefix, must match file exactly)\n-line to remove\n+line to add\n context line\n*** End Patch\n\nCRITICAL: The @@ line MUST be:\n- A SINGLE line copied VERBATIM from the file (not multiple lines)\n- A line that appears EXACTLY ONCE in the file (unique anchor)\n- The FIRST unchanged line BEFORE your edit location\n\nEXAMPLE - CORRECT:\nFile content:       Your patch @@ line:\n  class Foo:        @@ class Foo:\n    pass            -    pass\n                    +    def run(self): ...\n\nEXAMPLE - WRONG (do NOT do this):\n@@ class Foo:\\n    pass          <- WRONG: multiple lines\n@@                                 <- WRONG: blank\n@@ class                           <- WRONG: partial line\n\nBEFORE USING (REQUIRED):\n1. {{tool:read}} EVERY file you will patch.\n2. Copy the @@ line character-for-character from the read output.\n3. If patch fails, re-read file and rebuild patch from CURRENT content.\n\nCRITICAL REQUIREMENTS:\n1. @@ must be ONE literal line from file (unique, verbatim copy).\n2. Context lines (space prefix) must match file exactly including whitespace.\n3. If \"patch context not found\": re-read file, find a unique anchor line.\n4. For small files (<50 lines): prefer {{tool:write}} over patching.\n\nReturns: ok: N file(s) changed, +additions -removals",
+  "feedback": {
+    "patch_context_not_found": "ERROR: @@ context line not found in file. Common causes:\n1. @@ has multiple lines (WRONG) - must be ONE single line\n2. @@ is blank or partial (WRONG) - must be complete line from file\n3. Line was modified since last read\nACTION: Call {{tool:read}}({{target}}), then COPY a unique line VERBATIM for @@. For small files, use {{tool:write}} instead.",
+    "patch_context_not_unique": "FORMAT ERROR: {{tool:apply_patch}} failed: patch context not unique.\nACTION: Call {{tool:read}}(path) for {{target}}, then retry {{tool:apply_patch}} with MORE unique context lines, OR switch to {{tool:edit}} / {{tool:write}} if the file is small.",
+    "must_read_before_patching": "FORMAT ERROR: {{tool:apply_patch}} requires the file to be read first.\nACTION: Call {{tool:read}}(path) for {{target}} (use {{tool:read}}, NOT {{tool:search}}), then retry {{tool:apply_patch}}.",
+    "invalid_patch_format": "FORMAT ERROR: {{tool:apply_patch}} failed: invalid patch format.\nACTION: Provide a COMPLETE patch with *** Begin Patch and *** End Patch markers and valid context lines. Re-read the target file and retry {{tool:apply_patch}}.",
+    "unexpected_patch_line": "FORMAT ERROR: {{tool:apply_patch}} failed: unexpected patch line.\nACTION: Ensure each line starts with ' ', '+', or '-' and include a valid @@ context header. Re-read the target file and retry {{tool:apply_patch}}.",
+    "invalid_add_line": "FORMAT ERROR: {{tool:apply_patch}} failed: invalid add line.\nACTION: Lines being added must start with '+'. Re-read the target file and retry {{tool:apply_patch}}.",
+    "patch_file_not_found": "FORMAT ERROR: {{tool:apply_patch}} failed: file not found in patch header.\nACTION: Use {{tool:ls}}(path) or {{tool:glob}}(pat, path) to locate the correct file path, then retry {{tool:apply_patch}} with the correct '*** Update File:' path."
+  },
+  "additionalProperties": false,
+  "parameters": {
+    "patch": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "handler": "apply_patch"
+}

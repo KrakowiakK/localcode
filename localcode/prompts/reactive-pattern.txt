@@ -1,0 +1,57 @@
+## REACTIVE PROGRAMMING PATTERN
+
+A reactive system has:
+1. SOURCE cells (InputCell) - values you can set
+2. COMPUTED cells (ComputeCell) - values calculated from other cells
+3. When a source changes, all dependent computed cells must update
+
+### DATA FLOW ARCHITECTURE
+
+```
+InputCell ──┬──> ComputeCell A ──> ComputeCell C
+            │
+            └──> ComputeCell B ──────────┘
+```
+
+When InputCell.setValue() is called:
+1. InputCell updates its value
+2. InputCell notifies ALL its dependents (A and B)
+3. A and B recompute their values
+4. A and B notify THEIR dependents (C)
+5. C recomputes
+6. Callbacks fire for cells whose values CHANGED
+
+### CRITICAL IMPLEMENTATION DETAILS
+
+1. **Registration**: ComputeCell MUST register itself with its inputs:
+   ```
+   for (const input of inputCells) {
+       input._dependents.add(this);  // "I depend on you, notify me when you change"
+   }
+   ```
+
+2. **Function Contract**: The compute function receives CELL OBJECTS, not values:
+   ```
+   // CORRECT: fn receives array of cells
+   const fn = (inputs) => inputs[0].value + inputs[1].value;
+   this._fn(this._inputCells);  // Pass the cell objects
+
+   // WRONG: Don't pass just the values
+   // this._fn(inputCells.map(c => c.value));  // WRONG!
+   ```
+
+3. **Propagation**: When a cell changes, it must trigger updates:
+   ```
+   for (const dependent of this._dependents) {
+       dependent.update();  // Or however you named the recompute method
+   }
+   ```
+
+### COMMON MISTAKES
+
+| Mistake | Symptom |
+|---------|---------|
+| No `_dependents.add(this)` | ComputeCell never updates |
+| Passing values instead of cells | TypeError: inputs[0].value undefined |
+| Missing `_dependents` on ComputeCell | Chained compute cells don't update |
+| Callbacks fire on every update | Should only fire when value CHANGES |

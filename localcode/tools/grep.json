@@ -1,0 +1,28 @@
+{
+  "name": "grep",
+  "category": "read",
+  "description": "Search file contents with regex or literal text. Uses ripgrep if available. Results are limited to 100 entries.\n\nUSAGE:\n- Use {{tool:grep}} to locate text, then {{tool:read}} the file before editing.\n- Use output file paths verbatim; do not invent paths.\n\nDefaults:\n- path defaults to \".\"\n- include is optional\n- literal_text defaults to false\n\nExamples:\n- {{tool:grep}}({\"pat\": \"export function\", \"path\": \"src\"}) → find exports in src\n- {{tool:grep}}({\"pat\": \"TODO|FIXME\", \"path\": \".\", \"include\": \"*.js\"}) → find todos in JS files\n- {{tool:grep}}({\"pat\": \"foo.bar\", \"path\": \"src\", \"literal_text\": true}) → literal text search",
+  "feedback": {
+    "invalid_regex": "FORMAT ERROR: {{tool:grep}} failed: invalid regex.\nACTION: If you want literal text, set literal_text=true. Otherwise escape regex metacharacters and retry {{tool:grep}}.",
+    "search_path_missing": "FORMAT ERROR: {{tool:grep}} failed: path does not exist.\nACTION: Use {{tool:ls}}(path) or {{tool:glob}}(pat, path) to find the correct path, then retry {{tool:grep}}."
+  },
+  "additionalProperties": false,
+  "parameters": {
+    "pat": "string",
+    "path": {
+      "type": "string",
+      "optional": true,
+      "default": "."
+    },
+    "include": {
+      "type": "string",
+      "optional": true
+    },
+    "literal_text": {
+      "type": "boolean",
+      "optional": true,
+      "default": false
+    }
+  },
+  "handler": "grep"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "write",
+  "aliases": ["write_file"],
+  "category": "write",
+  "description": "Create or overwrite file. Creates parent directories if needed.\n\nPREFER {{tool:write}} when:\n- Creating new files\n- File is small (<50 lines) - simpler than patching\n- Rewriting most of file content\n- After {{tool:apply_patch}}/{{tool:edit}} failure\n\nWORKFLOW:\n1. {{tool:read}} file first to see current content\n2. Include ALL content you want in the file (write overwrites completely)\n3. Do NOT guess content - copy unchanged parts from read output\n\nExamples:\n- {{tool:write}}({\"path\": \"config.json\", \"content\": \"{\\\"debug\\\": true}\"})\n- {{tool:write}}({\"path\": \"app.js\", \"content\": \"...\"})\n\nReturns: ok: created/updated path, +N lines",
+  "additionalProperties": false,
+  "parameters": {
+    "path": "string",
+    "content": {
+      "type": "string",
+      "description": "Full file content to write"
+    }
+  },
+  "handler": "write"
+}

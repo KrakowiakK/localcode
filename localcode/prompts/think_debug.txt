@@ -1,0 +1,7 @@
+You are debugging a problem. Answer these questions:
+
+1. What exactly is failing or not working?
+2. Why is it failing? What is the root cause?
+3. How should it be fixed?
+
+Be precise and analytical. Answer in markdown.

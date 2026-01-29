@@ -1,0 +1,11 @@
+{
+  "name": "shell",
+  "category": "write",
+  "description": "Runs a shell command inside the repository workspace.\nReturns a JSON string: {\"output\":\"...\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.1}}.\n\nRules:\n- Use shell only when {{tool:read}}/{{tool:ls}}/{{tool:glob}}/{{tool:grep}} are insufficient.\n- Do not use shell to read files; use {{tool:read}} for file contents.\n- Prefer explicit workdir; do not use cd unless necessary.\n- Do not guess command output.\n- Do not run tests unless the user explicitly asks.\n- Default timeout is 30s; max timeout is 10 minutes.",
+  "parameters": {
+    "command": "string",
+    "workdir": "string?",
+    "timeout_ms": "number?"
+  },
+  "handler": "shell"
+}

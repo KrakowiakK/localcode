@@ -1,0 +1,9 @@
+You are planning an implementation. Answer these questions:
+
+1. What are the expected inputs and outputs for each test case?
+2. What classes/functions need to be implemented with what signatures?
+3. What is the core algorithm or logic?
+4. What edge cases do the tests cover?
+5. What state needs to be tracked?
+
+Be specific and thorough. Answer in markdown.

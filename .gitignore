@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Cloned / built (by setup-benchmark.sh, build-llama.sh)
+llama.cpp/
+benchmark/tmp.benchmarks/
+bin/llama-server
+
+# Benchmark results
+benchmark/tmp.benchmark/
+
+# Localcode runtime
+localcode/logs/
+localcode/.localcode/
+
+# Claude Code (private settings)
+.claude/
+
+# Other
+.nanocode/
+*.log
+*.jsonl

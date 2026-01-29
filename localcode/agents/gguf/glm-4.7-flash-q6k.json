@@ -1,0 +1,50 @@
+{
+  "name": "gguf/glm-4.7-flash-q6k",
+  "description": "GLM-4.7-Flash Q6_K via llama.cpp (GGUF) - higher quality quantization.",
+  "prompt": "prompts/glm.txt",
+  "model": "glm-4.7-flash-q6k",
+  "url": "http://localhost:1235/v1/chat/completions",
+  "temperature": 0.7,
+  "top_p": 1.0,
+  "top_k": 0,
+  "min_p": 0.01,
+  "max_tokens": 16000,
+  "tool_choice": "auto",
+  "cache": true,
+  "think": false,
+  "tool_name_style": "canonical",
+  "auto_tool_call_on_failure": true,
+  "require_code_change": true,
+  "thinking_visibility": "show",
+  "min_tool_calls": 1,
+  "max_format_retries": 2,
+  "max_batch_tool_calls": 20,
+  "tools": [
+    "list_dir",
+    "read_file",
+    "write_file",
+    "replace_in_file",
+    "patch_files",
+    "find_files",
+    "search_text",
+    "plan_solution"
+  ],
+  "native_thinking": false,
+  "server_config": {
+    "model_path": "~/.lmstudio/models/evilfreelancer/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q6_K.gguf",
+    "context_window": 202752,
+    "extra_args": [
+      "--cache-type-k",
+      "f16",
+      "--cache-type-v",
+      "f16",
+      "--ubatch-size",
+      "2048",
+      "--repeat-penalty",
+      "1.0",
+      "--chat-template-kwargs",
+      "{\"enable_thinking\":false}"
+    ],
+    "hf_model": "hf://evilfreelancer/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q6_K.gguf"
+  }
+}

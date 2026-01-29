@@ -1,0 +1,47 @@
+{
+  "name": "gguf/gpt-oss-20b",
+  "description": "GPT-OSS 20B via llama.cpp (GGUF) - Harmony format tool calling.",
+  "prompt": "prompts/gpt-oss-120b.txt",
+  "model": "gpt-oss-20b",
+  "url": "http://localhost:1235/v1/chat/completions",
+  "temperature": 1,
+  "top_p": 1,
+  "top_k": null,
+  "min_p": null,
+  "max_tokens": 16000,
+  "tool_choice": "required",
+  "cache": true,
+  "think": true,
+  "think_level": "high",
+  "tool_name_style": "alias",
+  "auto_tool_call_on_failure": true,
+  "require_code_change": true,
+  "min_tool_calls": 1,
+  "max_format_retries": 2,
+  "max_batch_tool_calls": 1,
+  "tools": [
+    "list_dir",
+    "read_file",
+    "write_file",
+    "replace_in_file",
+    "patch_files",
+    "find_files",
+    "search_text"
+  ],
+  "native_thinking": true,
+  "server_config": {
+    "model_path": "~/.lmstudio/models/unsloth/gpt-oss-20b-GGUF/gpt-oss-20b-UD-Q4_K_XL.gguf",
+    "context_window": 131072,
+    "extra_args": [
+      "--swa-full",
+      "--cache-type-k",
+      "q8_0",
+      "--cache-type-v",
+      "q8_0",
+      "--jinja",
+      "--reasoning-format",
+      "auto"
+    ],
+    "hf_model": "hf://unsloth/gpt-oss-20b-GGUF/gpt-oss-20b-UD-Q4_K_XL.gguf"
+  }
+}
