@@ -1,8 +1,20 @@
 # localcode
 
+```
+██╗      ██████╗  ██████╗  █████╗ ██╗      ██████╗ ██████╗ ██████╗ ███████╗
+██║     ██╔═══██╗██╔════╝ ██╔══██╗██║     ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+██║     ██║   ██║██║      ███████║██║     ██║     ██║   ██║██║  ██║█████╗
+██║     ██║   ██║██║      ██╔══██║██║     ██║     ██║   ██║██║  ██║██╔══╝
+███████╗╚██████╔╝╚██████╗ ██║  ██║███████╗╚██████╗╚██████╔╝██████╔╝███████╗
+╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
+                                                         by webdrroid.co.uk
+```
+
 Local coding agent + benchmark harness for evaluating LLMs on programming tasks.
 Agents run against local servers (llama.cpp GGUF or MLX) and solve Exercism tasks
 inside Docker using the polyglot-benchmark dataset.
+
+**Warning:** This project is under active development. Use it at your own risk — I take no responsibility for any outcomes, damage, or data loss.
 
 Repository: https://github.com/KrakowiakK/localcode
 
