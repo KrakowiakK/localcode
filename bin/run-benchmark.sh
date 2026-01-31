@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-# Localcode Benchmark Runner (bez zarządzania serwerem)
+# Localcode Benchmark Runner (no server management)
 #
-# User sam startuje serwer. Skrypt tylko:
-#   1. Sprawdza health serwera
-#   2. Uruchamia Docker benchmark
-#   3. Parsuje logi z localcode/logs/*.jsonl
-#   4. Wyświetla statystyki
+# The user starts the server manually. This script only:
+#   1. Checks server health
+#   2. Runs the Docker benchmark
+#   3. Parses logs from localcode/logs/*.jsonl
+#   4. Prints statistics
 #
-# Użycie:
+# Usage:
 #   ./bin/run-benchmark.sh <agent> -k space-age
 #   ./bin/run-benchmark.sh <agent> -k react,leap
 #   ./bin/run-benchmark.sh <agent> --all
@@ -16,7 +16,7 @@
 #   ./bin/run-benchmark.sh <agent> -k react --tries 2
 #   ./bin/run-benchmark.sh <agent> -k react --port 1235
 #
-# Przykłady:
+# Examples:
 #   ./bin/run-benchmark.sh jan-v3-4b -k react
 #   ./bin/run-benchmark.sh glm-4.7-flash -k react,space-age --tries 2
 #   ./bin/run-benchmark.sh gpt-oss-120b --all
@@ -28,49 +28,49 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCHMARK_DIR="$PROJECT_DIR/benchmark"
 
-# Kolory
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# Sprawdź czy setup został uruchomiony
+# Check if setup has been run
 if [ ! -d "$PROJECT_DIR/benchmark" ]; then
-    echo -e "${RED}BŁĄD: Katalog benchmark/ nie istnieje.${NC}"
-    echo "Uruchom najpierw: ./bin/setup-benchmark.sh"
+    echo -e "${RED}ERROR: benchmark/ directory does not exist.${NC}"
+    echo "Run first: ./bin/setup-benchmark.sh"
     exit 1
 fi
 
 if ! docker images | grep -q "benchmark-localcode"; then
-    echo -e "${RED}BŁĄD: Docker image 'benchmark-localcode' nie znaleziony.${NC}"
-    echo "Uruchom najpierw: ./bin/setup-benchmark.sh"
+    echo -e "${RED}ERROR: Docker image 'benchmark-localcode' not found.${NC}"
+    echo "Run first: ./bin/setup-benchmark.sh"
     exit 1
 fi
 
-# Sprawdź czy podano nazwę agenta jako pierwszy argument
+# Check if agent name was provided as the first argument
 if [ $# -eq 0 ]; then
-    echo -e "${RED}BŁĄD: Wymagana nazwa agenta jako pierwszy argument${NC}"
+    echo -e "${RED}ERROR: Agent name is required as the first argument${NC}"
     echo ""
-    echo "Użycie: $0 <agent> [opcje] [zadania]"
+    echo "Usage: $0 <agent> [options] [tasks]"
     echo ""
-    echo "Dostępni agenci GGUF:"
+    echo "Available GGUF agents:"
     ls -1 "$PROJECT_DIR/localcode/agents/gguf/"*.json 2>/dev/null | xargs -n1 basename | sed 's/.json$//' || true
     echo ""
-    echo "Dostępni agenci MLX:"
+    echo "Available MLX agents:"
     ls -1 "$PROJECT_DIR/localcode/agents/mlx/"*.json 2>/dev/null | xargs -n1 basename | sed 's/.json$//' || true
     echo ""
-    echo "Przykłady:"
+    echo "Examples:"
     echo "  $0 jan-v3-4b -k react"
     echo "  $0 glm-4.7-flash -k space-age,leap"
     echo "  $0 gpt-oss-120b --all"
     exit 1
 fi
 
-# Pierwszy argument to nazwa agenta
+# First argument is the agent name
 AGENT_NAME_ARG="$1"
 shift
 
-# Auto-detekcja prefiksu (gguf/mlx) i pliku agenta
+# Auto-detect prefix (gguf/mlx) and agent file
 AGENT_FILE=""
 AGENT_PREFIX=""
 if [ -f "$PROJECT_DIR/localcode/agents/gguf/${AGENT_NAME_ARG}.json" ]; then
@@ -80,20 +80,20 @@ elif [ -f "$PROJECT_DIR/localcode/agents/mlx/${AGENT_NAME_ARG}.json" ]; then
     AGENT_FILE="$PROJECT_DIR/localcode/agents/mlx/${AGENT_NAME_ARG}.json"
     AGENT_PREFIX="mlx"
 else
-    echo -e "${RED}BŁĄD: Nie znaleziono agenta: ${AGENT_NAME_ARG}${NC}"
-    echo "Szukano w:"
+    echo -e "${RED}ERROR: Agent not found: ${AGENT_NAME_ARG}${NC}"
+    echo "Searched in:"
     echo "  $PROJECT_DIR/localcode/agents/gguf/${AGENT_NAME_ARG}.json"
     echo "  $PROJECT_DIR/localcode/agents/mlx/${AGENT_NAME_ARG}.json"
     echo ""
-    echo "Dostępni agenci GGUF:"
+    echo "Available GGUF agents:"
     ls -1 "$PROJECT_DIR/localcode/agents/gguf/"*.json 2>/dev/null | xargs -n1 basename | sed 's/.json$//' || true
     echo ""
-    echo "Dostępni agenci MLX:"
+    echo "Available MLX agents:"
     ls -1 "$PROJECT_DIR/localcode/agents/mlx/"*.json 2>/dev/null | xargs -n1 basename | sed 's/.json$//' || true
     exit 1
 fi
 
-# Auto-detekcja portu z agent config (pole "url")
+# Auto-detect port from agent config ("url" field)
 AUTO_PORT=$(AGENT_FILE="$AGENT_FILE" python3 -c "
 import json, os, re
 try:
@@ -150,33 +150,33 @@ export BENCHMARK_TRIES
 
 TASKS="${TASKS# }"
 
-# Wymagaj zadań jeśli nie --all/--full
+# Require tasks unless --all/--full
 if [ -z "$TASKS" ] && [ "$RUN_ALL" = false ] && [ "$RUN_FULL" = false ]; then
-    echo -e "${RED}BŁĄD: Wymagane zadania lub --all/--full${NC}"
+    echo -e "${RED}ERROR: Tasks required or use --all/--full${NC}"
     echo ""
-    echo "Użycie: $0 $AGENT_NAME_ARG [opcje] <zadania>"
+    echo "Usage: $0 $AGENT_NAME_ARG [options] <tasks>"
     echo ""
-    echo "Przykłady:"
+    echo "Examples:"
     echo "  $0 $AGENT_NAME_ARG -k react"
     echo "  $0 $AGENT_NAME_ARG -k space-age,leap"
     echo "  $0 $AGENT_NAME_ARG --all"
     exit 1
 fi
 
-# Ustaw port (override > auto > fallback)
+# Set port (override > auto > fallback)
 SERVER_PORT="${PORT_OVERRIDE:-$AUTO_PORT}"
 
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  Localcode Benchmark Runner${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 
-# 1. Sprawdź czy serwer działa
-echo -e "\n${YELLOW}[1/2] Sprawdzam serwer na porcie ${SERVER_PORT}...${NC}"
+# 1. Check if the server is running
+echo -e "\n${YELLOW}[1/2] Checking server on port ${SERVER_PORT}...${NC}"
 
 if ! curl -sf "http://localhost:${SERVER_PORT}/health" >/dev/null 2>&1; then
-    echo -e "${RED}BŁĄD: Serwer nie działa na porcie ${SERVER_PORT}.${NC}"
+    echo -e "${RED}ERROR: Server is not running on port ${SERVER_PORT}.${NC}"
     echo ""
-    echo "Uruchom serwer ręcznie przed benchmarkiem:"
+    echo "Start the server manually before running the benchmark:"
     if [ "$AGENT_PREFIX" = "gguf" ]; then
         MODEL_NAME=$(AGENT_FILE="$AGENT_FILE" python3 -c "
 import json, os
@@ -194,11 +194,11 @@ except Exception:
 fi
 
 # Show loaded models
-echo -e "${GREEN}Serwer działa!${NC}"
-curl -s "http://localhost:${SERVER_PORT}/health" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Załadowane modele:', ', '.join(d.get('models', [])))" 2>/dev/null || true
+echo -e "${GREEN}Server is up!${NC}"
+curl -s "http://localhost:${SERVER_PORT}/health" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Loaded models:', ', '.join(d.get('models', [])))" 2>/dev/null || true
 
-# 2. Sprawdź model i uruchom benchmark
-echo -e "\n${YELLOW}[2/2] Uruchamiam benchmark...${NC}"
+# 2. Check model and run benchmark
+echo -e "\n${YELLOW}[2/2] Running benchmark...${NC}"
 
 AGENT_PATH="$AGENT_FILE"
 MODEL_FROM_AGENT=$(AGENT_PATH="$AGENT_PATH" python3 -c "
@@ -242,11 +242,11 @@ echo -e "Model: ${GREEN}$MODEL_INFO${NC}"
 echo -e "Port: ${GREEN}$SERVER_PORT${NC}"
 
 if [ "$RUN_FULL" = true ]; then
-    echo -e "Zadania: ${GREEN}WSZYSTKIE (wszystkie języki)${NC}"
+    echo -e "Tasks: ${GREEN}ALL (all languages)${NC}"
 elif [ "$RUN_ALL" = true ]; then
-    echo -e "Zadania: ${GREEN}WSZYSTKIE (49)${NC}"
+    echo -e "Tasks: ${GREEN}ALL (49)${NC}"
 else
-    echo -e "Zadania: ${GREEN}$TASKS${NC}"
+    echo -e "Tasks: ${GREEN}$TASKS${NC}"
 fi
 if [ -n "$AGENT_ARGS" ]; then
     export AGENT_ARGS
@@ -256,25 +256,25 @@ if [ "$BENCHMARK_TRIES" != "1" ]; then
     echo -e "Tries: ${GREEN}$BENCHMARK_TRIES${NC}"
 fi
 
-# Export z prefiksem gguf/ lub mlx/
+# Export with gguf/ or mlx/ prefix
 export LOCALCODE_AGENT_CONFIG="${AGENT_PREFIX}/${AGENT_NAME_ARG}"
 export BENCHMARK_SERVER_PORT=$SERVER_PORT
-echo -e "Wyniki: ${GREEN}$NAME${NC}"
+echo -e "Results: ${GREEN}$NAME${NC}"
 echo ""
 
-# Uruchom benchmark
+# Run benchmark
 LANG_ARGS="--languages javascript"
 if [ "$RUN_FULL" = true ]; then
     LANG_ARGS=""
 fi
 LOCALCODE_TURN_SUMMARY=${LOCALCODE_TURN_SUMMARY:-1} LOCALCODE_STREAM_OUTPUT=${LOCALCODE_STREAM_OUTPUT:-1} AGENT="${AGENT:-localcode}" NAME="$NAME" "$SCRIPT_DIR/run-localcode-benchmark.sh" $LANG_ARGS $TASKS
 
-# Statystyki po benchmarku
+# Post-benchmark stats
 RESULTS_DIR="$BENCHMARK_DIR/tmp.benchmark"
 RUN_DIR=$(ls -dt "$RESULTS_DIR"/*"$NAME"* 2>/dev/null | head -n 1)
 if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
     echo -e "\n${GREEN}════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  STATYSTYKI${NC}"
+    echo -e "${GREEN}  STATISTICS${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 RUN_DIR="$RUN_DIR" LOG_DIR="$PROJECT_DIR/localcode/logs" RUN_FULL="$RUN_FULL" LOCALCODE_AGENT_CONFIG="$LOCALCODE_AGENT_CONFIG" python3 - <<'PY'
 import json
@@ -827,11 +827,11 @@ for task in sorted_tasks:
 print_table("Per-task flow (sorted by tool calls)", rows, ["id", "task", "flow"])
 PY
 else
-    echo -e "${RED}Brak katalogu wyników dla: $NAME${NC}"
+    echo -e "${RED}No results directory for: $NAME${NC}"
 fi
 
-# Podsumowanie
+# Summary
 echo -e "\n${GREEN}════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  BENCHMARK ZAKOŃCZONY${NC}"
+echo -e "${GREEN}  BENCHMARK COMPLETE${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
-echo -e "Wyniki w: ${YELLOW}$BENCHMARK_DIR/tmp.benchmark/$NAME*${NC}"
+echo -e "Results in: ${YELLOW}$BENCHMARK_DIR/tmp.benchmark/$NAME*${NC}"

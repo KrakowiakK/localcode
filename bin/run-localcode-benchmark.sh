@@ -17,7 +17,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCHMARK_DIR="$PROJECT_DIR/benchmark"
 LOCALCODE_DIR="$PROJECT_DIR/localcode"
 
-# Domyślne wartości
+# Default values
 AGENT="${AGENT:-localcode}"
 LOCALCODE_AGENT_CONFIG="${LOCALCODE_AGENT_CONFIG:-localcode}"
 NAME="${NAME:-localcode-bench}"
@@ -33,10 +33,10 @@ export LOCALCODE_BENCHMARK_OUTPUT_MODE
 export LOCALCODE_TASK_SKIP_READONLY
 export LOCALCODE_AGENT_CONFIG
 
-# Wykryj port serwera z konfiguracji agenta lub użyj domyślnego
+# Detect server port from agent config or use default
 SERVER_PORT="${BENCHMARK_SERVER_PORT:-}"
 if [ -z "$SERVER_PORT" ]; then
-    # Spróbuj odczytać port z URL w konfiguracji agenta
+    # Try to read the port from the agent config URL
     for AGENT_DIR in "mlx" "gguf" ""; do
         if [ -n "$AGENT_DIR" ]; then
             AGENT_FILE="$LOCALCODE_DIR/agents/$AGENT_DIR/${LOCALCODE_AGENT_CONFIG}.json"
@@ -60,32 +60,32 @@ except: pass
 fi
 SERVER_PORT="${SERVER_PORT:-1234}"
 
-# Sprawdź czy serwer działa
-echo "Sprawdzam serwer na porcie $SERVER_PORT..."
+# Check if the server is running
+echo "Checking server on port $SERVER_PORT..."
 if ! curl -s "http://127.0.0.1:${SERVER_PORT}/health" >/dev/null 2>&1; then
-    echo "BŁĄD: Serwer nie odpowiada na localhost:${SERVER_PORT}"
-    echo "Uruchom: ./bin/start-server.sh <agent> --background"
+    echo "ERROR: Server not responding on localhost:${SERVER_PORT}"
+    echo "Run: ./bin/start-server.sh <agent> --background"
     exit 1
 fi
-echo "Serwer działa (port $SERVER_PORT)"
+echo "Server is up (port $SERVER_PORT)"
 
-# Sprawdź czy localcode istnieje
+# Check if localcode exists
 if [ ! -d "$LOCALCODE_DIR" ]; then
-    echo "BŁĄD: Nie znaleziono $LOCALCODE_DIR"
+    echo "ERROR: Not found $LOCALCODE_DIR"
     exit 1
 fi
 
-# Sprawdź czy benchmark dir istnieje
+# Check if benchmark dir exists
 if [ ! -d "$BENCHMARK_DIR" ]; then
-    echo "BŁĄD: Nie znaleziono $BENCHMARK_DIR"
-    echo "Uruchom: ./bin/setup-benchmark.sh"
+    echo "ERROR: Not found $BENCHMARK_DIR"
+    echo "Run: ./bin/setup-benchmark.sh"
     exit 1
 fi
 
-# Sprawdź czy obraz Docker istnieje
+# Check if Docker image exists
 if ! docker images --format '{{.Repository}}' | grep -q "^benchmark-localcode$"; then
-    echo "BŁĄD: Docker image 'benchmark-localcode' nie znaleziony."
-    echo "Uruchom: ./bin/setup-benchmark.sh"
+    echo "ERROR: Docker image 'benchmark-localcode' not found."
+    echo "Run: ./bin/setup-benchmark.sh"
     exit 1
 fi
 
@@ -97,7 +97,7 @@ echo "  Agent config: $LOCALCODE_AGENT_CONFIG"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 
-# Uruchom benchmark w Docker
+# Run benchmark in Docker
 docker run --rm \
     --memory=12g \
     --add-host=host.docker.internal:host-gateway \
@@ -126,4 +126,4 @@ docker run --rm \
         "$@"
 
 echo ""
-echo "Benchmark zakończony!"
+echo "Benchmark finished!"

@@ -1,6 +1,6 @@
 {
   "name": "gguf/bielik-11b-v3",
-  "description": "Bielik 11B v3.0 Instruct via llama.cpp (GGUF) - polski model dense.",
+  "description": "Bielik 11B v3.0 Instruct via llama.cpp (GGUF) - Polish dense model.",
   "prompt": "prompts/bielik.txt",
   "model": "bielik-11b-v3",
   "url": "http://localhost:1235/v1/chat/completions",
