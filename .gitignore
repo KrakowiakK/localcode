@@ -21,6 +21,7 @@ localcode/.localcode/
 
 # Claude Code (private settings)
 .claude/
+CLAUDE.md
 
 # Other
 .nanocode/
