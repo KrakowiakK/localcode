@@ -2905,7 +2905,7 @@ class TestSelfCall(unittest.TestCase):
         }).encode("utf-8")
         return resp
 
-    @patch("localcode.localcode.urllib.request.urlopen")
+    @patch("localcode.model_calls.urllib.request.urlopen")
     def test_correct_request_params(self, mock_urlopen):
         """Sends correct model, messages, temperature, max_tokens."""
         mock_urlopen.return_value = self._mock_urlopen("ok")
@@ -2922,7 +2922,7 @@ class TestSelfCall(unittest.TestCase):
         self.assertEqual(data["messages"][0]["content"], "system prompt")
         self.assertEqual(data["messages"][-1]["content"], "hello")
 
-    @patch("localcode.localcode.urllib.request.urlopen")
+    @patch("localcode.model_calls.urllib.request.urlopen")
     def test_include_history(self, mock_urlopen):
         """include_history=True includes CURRENT_MESSAGES."""
         mock_urlopen.return_value = self._mock_urlopen("ok")
@@ -2937,7 +2937,7 @@ class TestSelfCall(unittest.TestCase):
         self.assertEqual(len(data["messages"]), 4)
         _inner.CURRENT_MESSAGES = []
 
-    @patch("localcode.localcode.urllib.request.urlopen")
+    @patch("localcode.model_calls.urllib.request.urlopen")
     def test_no_history(self, mock_urlopen):
         """include_history=False excludes CURRENT_MESSAGES."""
         mock_urlopen.return_value = self._mock_urlopen("ok")
@@ -2951,7 +2951,7 @@ class TestSelfCall(unittest.TestCase):
         self.assertEqual(len(data["messages"]), 2)
         _inner.CURRENT_MESSAGES = []
 
-    @patch("localcode.localcode.urllib.request.urlopen")
+    @patch("localcode.model_calls.urllib.request.urlopen")
     def test_user_prefix(self, mock_urlopen):
         """user_prefix is prepended to user message."""
         mock_urlopen.return_value = self._mock_urlopen("ok")
@@ -2960,7 +2960,7 @@ class TestSelfCall(unittest.TestCase):
         data = json.loads(mock_urlopen.call_args[0][0].data)
         self.assertEqual(data["messages"][-1]["content"], "PREFIX: my prompt")
 
-    @patch("localcode.localcode.urllib.request.urlopen")
+    @patch("localcode.model_calls.urllib.request.urlopen")
     def test_api_error(self, mock_urlopen):
         """API error returns error string."""
         mock_urlopen.side_effect = Exception("connection refused")
@@ -2972,7 +2972,7 @@ class TestSelfCall(unittest.TestCase):
 class TestSubprocessCall(unittest.TestCase):
     """Test _subprocess_call (mocked subprocess)."""
 
-    @patch("localcode.localcode.subprocess.run")
+    @patch("localcode.model_calls.subprocess.run")
     def test_correct_cmd(self, mock_run):
         """Passes correct command arguments."""
         mock_run.return_value = MagicMock(stdout="response text", stderr="", returncode=0)
@@ -2986,7 +2986,7 @@ class TestSubprocessCall(unittest.TestCase):
         self.assertEqual(cmd[4], "--url")
         self.assertEqual(cmd[6], "do something")
 
-    @patch("localcode.localcode.subprocess.run")
+    @patch("localcode.model_calls.subprocess.run")
     def test_strip_status_lines(self, mock_run):
         """strip_status_lines removes localcode status output."""
         stdout = "localcode[info] starting\nTURN 1\nactual response\nTASK 1 TRY 1"
@@ -2995,7 +2995,7 @@ class TestSubprocessCall(unittest.TestCase):
         result = agent._subprocess_call("q", "agent", 300, [], config)
         self.assertEqual(result, "actual response")
 
-    @patch("localcode.localcode.subprocess.run")
+    @patch("localcode.model_calls.subprocess.run")
     def test_timeout(self, mock_run):
         """Timeout returns error string."""
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="test", timeout=60)
@@ -3022,8 +3022,8 @@ class TestMakeModelCallHandler(unittest.TestCase):
         self.assertIn("error:", result)
         self.assertIn("prompt", result)
 
-    @patch("localcode.localcode._self_call")
-    @patch("localcode.localcode._load_prompt_file")
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
     def test_self_mode_calls_self_call(self, mock_load, mock_self_call):
         """Self mode calls _self_call with config params."""
         mock_load.return_value = "loaded prompt"
@@ -3040,21 +3040,21 @@ class TestMakeModelCallHandler(unittest.TestCase):
         handler = agent.make_model_call_handler("test_tool", config)
         result = handler({"prompt": "hello"})
         self.assertEqual(result, "model response")
-        mock_self_call.assert_called_once_with(
-            prompt="hello",
-            system_prompt="loaded prompt",
-            temperature=0.5,
-            max_tokens=2000,
-            timeout=60,
-            include_history=False,
-            user_prefix="TEST: ",
-        )
+        mock_self_call.assert_called_once()
+        call_kwargs = mock_self_call.call_args[1]
+        self.assertEqual(call_kwargs["prompt"], "hello")
+        self.assertEqual(call_kwargs["system_prompt"], "loaded prompt")
+        self.assertEqual(call_kwargs["temperature"], 0.5)
+        self.assertEqual(call_kwargs["max_tokens"], 2000)
+        self.assertEqual(call_kwargs["timeout"], 60)
+        self.assertEqual(call_kwargs["include_history"], False)
+        self.assertEqual(call_kwargs["user_prefix"], "TEST: ")
 
-    @patch("localcode.localcode._self_call")
-    @patch("localcode.localcode._load_prompt_file")
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
     def test_self_mode_stage_dispatch(self, mock_load, mock_self_call):
         """Stage param selects the correct stage prompt file."""
-        mock_load.side_effect = lambda p: f"content of {p}"
+        mock_load.side_effect = lambda p, base_dir: f"content of {p}"
         mock_self_call.return_value = "ok"
         config = {
             "mode": "self",
@@ -3071,7 +3071,7 @@ class TestMakeModelCallHandler(unittest.TestCase):
         call_kwargs = mock_self_call.call_args
         self.assertEqual(call_kwargs[1]["system_prompt"], "content of prompts/plan.txt")
 
-    @patch("localcode.localcode._subprocess_call")
+    @patch("localcode.model_calls._subprocess_call")
     def test_subprocess_mode(self, mock_sub):
         """Subprocess mode calls _subprocess_call."""
         mock_sub.return_value = "agent response"
@@ -3083,16 +3083,28 @@ class TestMakeModelCallHandler(unittest.TestCase):
         handler = agent.make_model_call_handler("ask_agent", config)
         result = handler({"prompt": "analyze this", "files": ["test.py"]})
         self.assertEqual(result, "agent response")
-        mock_sub.assert_called_once_with("analyze this", "code-architect", 300, ["test.py"], config)
+        mock_sub.assert_called_once()
+        call_args = mock_sub.call_args
+        self.assertEqual(call_args[0][0], "analyze this")
+        self.assertEqual(call_args[0][1], "code-architect")
+        self.assertEqual(call_args[0][2], 300)
+        self.assertEqual(call_args[0][3], ["test.py"])
+        self.assertEqual(call_args[0][4], config)
 
-    @patch("localcode.localcode._subprocess_call")
+    @patch("localcode.model_calls._subprocess_call")
     def test_subprocess_mode_override_agent(self, mock_sub):
         """Subprocess mode respects agent override from args."""
         mock_sub.return_value = "ok"
         config = {"mode": "subprocess", "default_agent": "code-architect", "default_timeout": 300}
         handler = agent.make_model_call_handler("ask_agent", config)
         handler({"prompt": "q", "agent": "custom-agent", "timeout": 60})
-        mock_sub.assert_called_once_with("q", "custom-agent", 60, [], config)
+        mock_sub.assert_called_once()
+        call_args = mock_sub.call_args
+        self.assertEqual(call_args[0][0], "q")
+        self.assertEqual(call_args[0][1], "custom-agent")
+        self.assertEqual(call_args[0][2], 60)
+        self.assertEqual(call_args[0][3], [])
+        self.assertEqual(call_args[0][4], config)
 
 
 class TestModelCallRegistration(unittest.TestCase):
@@ -3136,7 +3148,7 @@ class TestModelCallRegistration(unittest.TestCase):
 class TestSelfCallBatch(unittest.TestCase):
     """Tests for _self_call_batch concurrent execution."""
 
-    @patch.object(_inner, "_self_call")
+    @patch("localcode.model_calls._self_call")
     def test_all_succeed_merged_in_order(self, mock_self_call):
         """All questions succeed — answers merged in original order."""
         def side_effect(prompt, **kwargs):
@@ -3162,7 +3174,7 @@ class TestSelfCallBatch(unittest.TestCase):
         self.assertLess(idx2, idx3)
         self.assertIn("---", result)
 
-    @patch.object(_inner, "_self_call")
+    @patch("localcode.model_calls._self_call")
     def test_fail_all_on_error(self, mock_self_call):
         """If any question fails, entire batch returns the error."""
         call_count = [0]
@@ -3180,12 +3192,13 @@ class TestSelfCallBatch(unittest.TestCase):
         )
         self.assertTrue(result.startswith("error:"))
 
-    @patch.object(_inner, "_self_call")
+    @patch("localcode.model_calls._self_call")
     def test_respects_max_concurrent(self, mock_self_call):
         """max_concurrent is passed to ThreadPoolExecutor."""
         mock_self_call.return_value = "ok"
 
-        with patch.object(_inner, "ThreadPoolExecutor", wraps=_inner.ThreadPoolExecutor) as mock_pool:
+        import localcode.model_calls as _model_calls_mod
+        with patch.object(_model_calls_mod, "ThreadPoolExecutor", wraps=_model_calls_mod.ThreadPoolExecutor) as mock_pool:
             agent._self_call_batch(
                 questions=["q1", "q2"],
                 system_prompt="test",
@@ -3193,7 +3206,7 @@ class TestSelfCallBatch(unittest.TestCase):
             )
             mock_pool.assert_called_once_with(max_workers=2)
 
-    @patch.object(_inner, "_self_call")
+    @patch("localcode.model_calls._self_call")
     def test_output_format(self, mock_self_call):
         """Output has ## Question N headers and --- separators."""
         mock_self_call.return_value = "some answer"
@@ -3205,7 +3218,7 @@ class TestSelfCallBatch(unittest.TestCase):
         self.assertIn("## Question 2: q2", result)
         self.assertIn("\n\n---\n\n", result)
 
-    @patch.object(_inner, "_self_call")
+    @patch("localcode.model_calls._self_call")
     def test_single_question_no_separator(self, mock_self_call):
         """Single question has no --- separator."""
         mock_self_call.return_value = "answer"
@@ -3273,8 +3286,8 @@ class TestMakeModelCallHandlerSelfBatch(unittest.TestCase):
         self.assertIn("error:", result)
         self.assertIn("at least one non-empty", result)
 
-    @patch.object(_inner, "_self_call_batch")
-    @patch.object(_inner, "_load_prompt_file", return_value="test system prompt")
+    @patch("localcode.model_calls._self_call_batch")
+    @patch("localcode.model_calls._load_prompt_file", return_value="test system prompt")
     def test_calls_batch_with_config(self, mock_load, mock_batch):
         """Calls _self_call_batch with correct parameters from config."""
         mock_batch.return_value = "batch result"
@@ -3285,19 +3298,19 @@ class TestMakeModelCallHandlerSelfBatch(unittest.TestCase):
             max_concurrent=2,
         )
         result = handler({"questions": ["q1", "q2"]})
-        mock_batch.assert_called_once_with(
-            questions=["q1", "q2"],
-            system_prompt="test system prompt",
-            temperature=0.5,
-            max_tokens=3000,
-            timeout=60,
-            include_history=True,
-            max_concurrent=2,
-        )
+        mock_batch.assert_called_once()
+        call_kwargs = mock_batch.call_args
+        self.assertEqual(call_kwargs[1]["questions"], ["q1", "q2"])
+        self.assertEqual(call_kwargs[1]["system_prompt"], "test system prompt")
+        self.assertEqual(call_kwargs[1]["temperature"], 0.5)
+        self.assertEqual(call_kwargs[1]["max_tokens"], 3000)
+        self.assertEqual(call_kwargs[1]["timeout"], 60)
+        self.assertEqual(call_kwargs[1]["include_history"], True)
+        self.assertEqual(call_kwargs[1]["max_concurrent"], 2)
         self.assertEqual(result, "batch result")
 
-    @patch.object(_inner, "_self_call_batch")
-    @patch.object(_inner, "_load_prompt_file", return_value="prompt")
+    @patch("localcode.model_calls._self_call_batch")
+    @patch("localcode.model_calls._load_prompt_file", return_value="prompt")
     def test_does_not_require_prompt(self, mock_load, mock_batch):
         """questions-only args work without prompt field."""
         mock_batch.return_value = "ok"
@@ -3305,6 +3318,3 @@ class TestMakeModelCallHandlerSelfBatch(unittest.TestCase):
         result = handler({"questions": ["q1"]})
         self.assertEqual(result, "ok")
 
-
-if __name__ == "__main__":
-    unittest.main()

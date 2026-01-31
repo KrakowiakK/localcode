@@ -3,6 +3,7 @@ Path validation and ignore checks for tool handlers.
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -50,3 +51,50 @@ def _is_ignored_path(path: str) -> bool:
     except Exception:
         parts = path.split(os.sep)
     return any(part in DEFAULT_IGNORE_DIRS for part in parts)
+
+
+_TEST_DIRS = {"test", "tests", "__tests__", "__test__", "spec", "specs"}
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSEY = {"0", "false", "no", "off"}
+_TEST_FILE_RE = re.compile(r"(^|[._-])(test|spec)([._-]|$)")
+
+
+def _is_test_path(path: str) -> bool:
+    if not path:
+        return False
+    normalized = path.replace("\\", "/").lower()
+    parts = [p for p in normalized.split("/") if p]
+    if not parts:
+        return False
+    for part in parts[:-1]:
+        if part in _TEST_DIRS:
+            return True
+    filename = parts[-1]
+    if ".test." in filename or ".spec." in filename:
+        return True
+    if filename.startswith(("test_", "spec_")):
+        return True
+    if "_test." in filename or "_spec." in filename:
+        return True
+    if _TEST_FILE_RE.search(filename):
+        return True
+    return False
+
+
+def _is_benchmark_mode() -> bool:
+    value = os.environ.get("LOCALCODE_BENCHMARK", "")
+    if str(value).strip().lower() in _TRUTHY:
+        return True
+    return bool(os.environ.get("BENCHMARK_DIR") or os.environ.get("AIDER_DOCKER"))
+
+
+def _should_block_test_edit(path: str) -> bool:
+    override = str(os.environ.get("LOCALCODE_BLOCK_TEST_EDITS", "")).strip().lower()
+    if override:
+        if override in _FALSEY:
+            return False
+        if override in _TRUTHY:
+            return _is_test_path(path)
+    if not _is_benchmark_mode():
+        return False
+    return _is_test_path(path)

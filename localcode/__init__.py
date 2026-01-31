@@ -12,8 +12,8 @@ def _load_agent():
 
 
 def __getattr__(name):
-    # Allow direct submodule access (hooks, middleware) without loading localcode.py
-    if name in ("hooks", "middleware"):
+    # Allow direct submodule access without loading localcode.py
+    if name in ("hooks", "middleware", "config", "session", "model_calls", "task_manager"):
         import importlib
         return importlib.import_module(f".{name}", __name__)
     return getattr(_load_agent(), name)

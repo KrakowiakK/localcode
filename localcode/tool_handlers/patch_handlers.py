@@ -15,7 +15,7 @@ from localcode.tool_handlers._state import (
     _sha256,
     _track_file_version,
 )
-from localcode.tool_handlers._path import _validate_path
+from localcode.tool_handlers._path import _should_block_test_edit, _validate_path
 
 
 def _normalize_indent(line: str) -> str:
@@ -188,6 +188,19 @@ def apply_patch_fn(args: Any) -> str:
             return "error: invalid patch format (missing Begin Patch)"
         if not any(line.strip() == "*** End Patch" for line in lines):
             return "error: invalid patch format (missing End Patch)"
+
+        for line in lines:
+            raw_path = None
+            if line.startswith("*** Update File: "):
+                raw_path = line[len("*** Update File: "):].strip()
+            elif line.startswith("*** Add File: "):
+                raw_path = line[len("*** Add File: "):].strip()
+            elif line.startswith("*** Delete File: "):
+                raw_path = line[len("*** Delete File: "):].strip()
+            elif line.startswith("*** Move to: "):
+                raw_path = line[len("*** Move to: "):].strip()
+            if raw_path and _should_block_test_edit(raw_path):
+                return f"error: test file edits are blocked in benchmark mode ({raw_path})"
 
         # Repeat detection: per-file block hashing
         # Split patch into per-file blocks and hash each separately

@@ -11,7 +11,7 @@ from localcode.tool_handlers._state import (
     _require_args_dict,
     _track_file_version,
 )
-from localcode.tool_handlers._path import _validate_path
+from localcode.tool_handlers._path import _should_block_test_edit, _validate_path
 
 
 def write(args: Any) -> str:
@@ -22,6 +22,8 @@ def write(args: Any) -> str:
         path = _validate_path(args.get("path"), check_exists=False)
     except ValueError as e:
         return f"error: {e}"
+    if _should_block_test_edit(path):
+        return f"error: test file edits are blocked in benchmark mode ({path})"
 
     content = args.get("content")
     if content is None:
@@ -89,6 +91,8 @@ def edit(args: Any) -> str:
         path = _validate_path(args.get("path"), check_exists=True)
     except ValueError as e:
         return f"error: {e}"
+    if _should_block_test_edit(path):
+        return f"error: test file edits are blocked in benchmark mode ({path})"
 
     old = args.get("old")
     new = args.get("new")

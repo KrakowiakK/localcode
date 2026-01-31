@@ -1,9 +1,10 @@
-# BENCHMARK
+# localcode
 
-Local benchmark framework for testing LLM models on programming tasks.
-Models are served via **llama.cpp** (GGUF) or **MLX** (Apple Silicon) and tested
-by the **localcode** agent inside Docker using exercism exercises from
-[polyglot-benchmark](https://github.com/Aider-AI/polyglot-benchmark).
+Local coding agent + benchmark harness for evaluating LLMs on programming tasks.
+Agents run against local servers (llama.cpp GGUF or MLX) and solve Exercism tasks
+inside Docker using the polyglot-benchmark dataset.
+
+Repository: https://github.com/KrakowiakK/localcode
 
 ## How It Works
 
@@ -18,9 +19,8 @@ by the **localcode** agent inside Docker using exercism exercises from
 ```
 
 1. **Server** — llama.cpp serves a GGUF model on port 1235 (or MLX on port 1234)
-2. **Docker** — `benchmark.py` runs exercism tests inside a container
-3. **Agent** — `localcode` (Python, native tool calls) solves the task by communicating
-   with the server via an OpenAI-compatible API
+2. **Docker** — `benchmark.py` runs Exercism tests inside a container
+3. **Agent** — `localcode` (Python, native tool calls) solves the task via an OpenAI‑compatible API
 4. **Results** — pass/fail per task, tool call statistics, tokens, TPS
 
 ## Requirements
@@ -33,7 +33,14 @@ by the **localcode** agent inside Docker using exercism exercises from
 
 ## Quick Start
 
-### 1. Setup (first time)
+### 1. Clone
+
+```bash
+git clone https://github.com/KrakowiakK/localcode.git
+cd localcode
+```
+
+### 2. Setup (first time)
 
 ```bash
 # Clones polyglot-benchmark, builds Docker image
@@ -43,7 +50,7 @@ by the **localcode** agent inside Docker using exercism exercises from
 ./bin/build-llama.sh
 ```
 
-### 2. Run a benchmark
+### 3. Run a benchmark
 
 ```bash
 # Start server (background)
@@ -65,7 +72,7 @@ by the **localcode** agent inside Docker using exercism exercises from
 ./bin/stop-server.sh
 ```
 
-### 3. Results
+### 4. Results
 
 After completion the script prints a results table:
 
@@ -80,7 +87,7 @@ Raw results are stored in: `benchmark/tmp.benchmark/<run-name>/`
 ## Project Structure
 
 ```
-BENCHMARK/
+localcode/
 ├── bin/                            # Scripts
 │   ├── llama-server                # Compiled binary
 │   ├── setup-benchmark.sh          # Setup: clones polyglot + builds Docker
@@ -149,12 +156,6 @@ Starts llama-server using configuration from an agent JSON file.
 ./bin/start-server.sh glm-4.7-flash --background
 ./bin/start-server.sh gpt-oss-120b-mxfp4 --port 1236
 ```
-
-The script:
-- Reads `localcode/agents/gguf/<agent>.json`
-- Extracts model path, port, context window, extra_args
-- If the model file is missing locally, llama.cpp downloads it from HuggingFace
-- Waits for a successful health check (`/health`) before returning
 
 ### `stop-server.sh`
 
@@ -260,12 +261,55 @@ Agent configs in `localcode/agents/*.json` define model, tools, and inference pa
 | `min_tool_calls` | Minimum tool calls required |
 | `max_format_retries` | Retries on malformed responses |
 | `max_batch_tool_calls` | Max tool calls per response (1-10) |
+| `phase_log` | `off` / `stdout` / `log` / `both` |
 | `server_config.model_path` | Local path to the GGUF file |
 | `server_config.hf_model` | HuggingFace fallback for download |
 | `server_config.extra_args` | Additional flags for llama-server |
 
 Agent names use the JSON path relative to `agents/`:
 - `agents/gguf/gpt-oss-120b.json` → `--agent gguf/gpt-oss-120b`
+
+### Phase Control (side-channel)
+
+Optional phase control that does not write to conversation history.
+It injects small phase hints into the system prompt and can classify phase
+transitions using rules or a lightweight probe call.
+
+Agent config:
+
+```json
+"phase_log": "both",
+"phase_control": {
+  "mode": "off" | "rules" | "llm" | "hybrid",
+  "states": ["context","plan","implement"],
+  "default": "context",
+  "rules": {
+    "min_files_read_for_plan": 1,
+    "auto_plan_after_read": true,
+    "write_to_implement": true
+  },
+  "probe": {
+    "temperature": 0,
+    "max_tokens": 64
+  },
+  "prompts": {
+    "context": "Before making changes, read the relevant files.",
+    "plan": "Outline a short plan before editing.",
+    "implement": "Make the code changes now."
+  }
+}
+```
+
+You can also set it globally:
+
+```bash
+LOCALCODE_PHASE_LOG=both
+```
+
+### Flow / Staged Modes
+
+For stricter multi‑stage workflows, use `task_flow_mode` or a custom `flow` with
+`flow_stage_done` and `plan_tasks`. See `TASK_FLOW.md` for details.
 
 ### Available Tools
 
@@ -285,13 +329,8 @@ Agent names use the JSON path relative to `agents/`:
 | `ask_agent` | - | Delegate to sub-agent |
 | `ask_questions` | - | Batch reasoning questions |
 | `plan_solution` | `get_plan` | Plan before implementing |
-
-### Available Agents
-
-Full list: `ls localcode/agents/gguf/`
-
-Examples: `glm-4.7-flash`, `gpt-oss-120b-mxfp4`, `minimax-m2.1`, `qwen3-coder-30b`,
-`qwen3-coder-480b`, `nemotron-3-nano-30b`, `jan-v3-4b`, `bielik-11b-v3`, and more.
+| `plan_tasks` | - | Structured planning for staged flows |
+| `flow_stage_done` | - | Mark a flow stage as complete |
 
 ### Testing
 
@@ -302,9 +341,9 @@ Examples: `glm-4.7-flash`, `gpt-oss-120b-mxfp4`, `minimax-m2.1`, `qwen3-coder-30
 ### Logs
 
 Each run creates log files in `localcode/logs/`:
-- `.jsonl` — structured events (requests, responses, tool calls)
-- `.log` — human-readable output
-- `.raw.json` — raw API responses
+- `.jsonl` — structured events (requests, responses, tool calls, phase events)
+- `.log` — human-readable conversation dump (includes **PHASE EVENTS** when `phase_log=log|both`)
+- `.raw.json` — raw conversation in JSON
 
 ---
 
@@ -322,4 +361,11 @@ cat benchmark/tmp.benchmark/<run>/javascript/exercises/practice/space-age/.aider
 
 # Server health check
 curl http://localhost:1235/health | python3 -m json.tool
+```
+
+## Cleanup
+
+```bash
+# Remove benchmark results and runtime logs
+rm -rf benchmark/tmp.benchmark/* localcode/logs/* localcode/.localcode/*
 ```

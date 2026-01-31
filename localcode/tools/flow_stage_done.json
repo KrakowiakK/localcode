@@ -1,0 +1,54 @@
+{
+  "name": "flow_stage_done",
+  "aliases": ["flow_stage_done", "stage_done", "flow_done"],
+  "category": "reasoning",
+  "description": "Signal that the current flow stage is complete and provide structured metadata for the next stage.",
+  "additionalProperties": false,
+  "parameters": {
+    "stage": {
+      "type": "string",
+      "description": "Stage id (e.g., context, architect, implement)"
+    },
+    "summary": {
+      "type": "string?",
+      "description": "Concise summary of what was learned/decided in this stage"
+    },
+    "goals": {
+      "type": "array?",
+      "items": {"type": "string"},
+      "description": "Key goals identified in this stage"
+    },
+    "decisions": {
+      "type": "array?",
+      "items": {"type": "string"},
+      "description": "Design/architecture decisions made"
+    },
+    "risks": {
+      "type": "array?",
+      "items": {"type": "string"},
+      "description": "Risks or open issues to track"
+    },
+    "next_actions": {
+      "type": "array?",
+      "items": {"type": "string"},
+      "description": "What the next stage should do"
+    },
+    "files_read": {
+      "type": "array?",
+      "items": {"type": "string"},
+      "description": "Files read during this stage"
+    },
+    "files_changed": {
+      "type": "array?",
+      "items": {"type": "string"},
+      "description": "Files changed during this stage"
+    },
+    "metadata": {
+      "type": "object?",
+      "description": "Additional structured metadata",
+      "additionalProperties": true
+    }
+  },
+  "required": ["stage"],
+  "handler": "flow_stage_done"
+}

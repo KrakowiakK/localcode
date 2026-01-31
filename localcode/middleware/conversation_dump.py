@@ -6,15 +6,35 @@ Registers on 'agent_end' event to dump the full conversation.
 """
 
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 from localcode import hooks
+
+
+def _load_phase_events(log_path: str) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    if not log_path or not os.path.exists(log_path):
+        return events
+    try:
+        with open(log_path, "r", encoding="utf-8") as lf:
+            for line in lf:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("event") in {"phase_state", "phase_transition", "phase_probe_error", "phase_probe_parse_error"}:
+                    events.append(rec)
+    except Exception:
+        return events
+    return events
 
 
 def _dump_conversation(
     log_path: str,
     system_prompt: str,
     messages: List[Dict[str, Any]],
+    phase_log_mode: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
     """Dump full conversation to .raw.json and .log files.
 
@@ -59,6 +79,17 @@ def _dump_conversation(
                     except (json.JSONDecodeError, TypeError):
                         cf.write(str(args_str))
                     cf.write(f"\n\n")
+            phase_mode = str(phase_log_mode or "").strip().lower()
+            if phase_mode in {"log", "both"}:
+                phase_events = _load_phase_events(log_path)
+                if phase_events:
+                    cf.write(f"{'='*60}\nPHASE EVENTS\n{'='*60}\n\n")
+                    for ev in phase_events:
+                        ts = ev.get("ts", "")
+                        event = ev.get("event", "")
+                        payload = {k: v for k, v in ev.items() if k not in {"ts", "event"}}
+                        cf.write(f"[{ts}] {event} {json.dumps(payload, ensure_ascii=False)}\n")
+                    cf.write("\n")
             cf.write(f"{'='*60}\nEND ({len(full_conv)} messages)\n{'='*60}\n")
     except Exception:
         pass
@@ -74,8 +105,9 @@ def on_agent_end(data: Dict[str, Any]) -> Dict[str, Any]:
 
     system_prompt = data.get("system_prompt", "")
     messages = data.get("messages", [])
+    phase_log_mode = data.get("phase_log_mode")
 
-    result = _dump_conversation(log_path, system_prompt, messages)
+    result = _dump_conversation(log_path, system_prompt, messages, phase_log_mode=phase_log_mode)
     if result:
         data["conversation_dump"] = result
 
