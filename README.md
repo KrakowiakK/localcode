@@ -7,7 +7,7 @@
 ██║     ██║   ██║██║      ██╔══██║██║     ██║     ██║   ██║██║  ██║██╔══╝
 ███████╗╚██████╔╝╚██████╗ ██║  ██║███████╗╚██████╗╚██████╔╝██████╔╝███████╗
 ╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
-                                                         by webdrroid.co.uk
+                                                         by webdroid.co.uk
 ```
 
 Local coding agent + benchmark harness for evaluating LLMs on programming tasks.
