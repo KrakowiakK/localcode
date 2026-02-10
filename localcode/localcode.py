@@ -668,7 +668,7 @@ def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
         "phase_log": "off",
     }
 
-    for k in ("min_tool_calls", "max_format_retries"):
+    for k in ("min_tool_calls", "max_format_retries", "max_turns"):
         if k in agent_config:
             settings[k] = agent_config[k]
 
@@ -1613,6 +1613,8 @@ def run_agent(
     forced_tool_choice: Optional[str] = None
 
     native_thinking = bool(agent_settings.get("native_thinking", False))
+
+    agent_max_turns = int(agent_settings.get("max_turns", MAX_TURNS) or MAX_TURNS)
 
     format_retry_turns = 0  # Track turns consumed by format retries (not counted toward MAX_TURNS)
 
@@ -2677,17 +2679,35 @@ def run_agent(
         if staged_result is not None:
             return staged_result
 
+    def _emit_agent_end_on_error(error_msg):
+        """Emit agent_end hook on error paths so .log and .raw.json are always created."""
+        summary = _metrics.summary()
+        end_data = hooks.emit("agent_end", {
+            "summary": summary,
+            "messages": messages,
+            "content": error_msg,
+            "turns": turns,
+            "log_path": logging_hook.get_log_path(),
+            "system_prompt": system_prompt,
+            "phase_log_mode": phase_log_mode,
+        })
+        dump_info = end_data.get("conversation_dump")
+        if dump_info:
+            logging_hook.log_event("conversation_saved", dump_info)
+
     while True:
         turns += 1
         hooks.emit("turn_start", {"turn": turns, "messages": messages})
-        if turns > MAX_TURNS * 3:
+        if turns > agent_max_turns * 3:
             # Hard cap: prevent infinite loops even with format retries
             logging_hook.log_event("agent_abort", {"reason": "hard_turn_limit", "turns": turns})
+            _emit_agent_end_on_error("error: hard turn limit reached")
             return "error: hard turn limit reached", messages
-        if (turns - format_retry_turns) > MAX_TURNS:
+        if (turns - format_retry_turns) > agent_max_turns:
             summary = _metrics.summary()
             LAST_RUN_SUMMARY = summary
             logging_hook.log_event("agent_abort", {"reason": "max_turns", "turns": turns, **summary})
+            _emit_agent_end_on_error("error: max turns reached")
             return "error: max turns reached", messages
 
         request_messages = _select_request_messages(messages)
@@ -2730,6 +2750,7 @@ def run_agent(
 
         if response.get("error"):
             logging_hook.log_event("api_error", {"turn": turns, "error": response["error"]})
+            _emit_agent_end_on_error(f"error: {response['error']}")
             return f"error: {response['error']}", messages
 
         usage_info = format_usage_info(response.get("usage"), response.get("timings"))
@@ -2752,6 +2773,11 @@ def run_agent(
         thinking = message.get("thinking")
         if not thinking:
             thinking = message.get("reasoning_content")
+        # Fallback: parse <think> from content when server returns thinking inline
+        if not thinking and content and "</think>" in content:
+            think_end = content.find("</think>")
+            thinking = content[:think_end].strip()
+            content = content[think_end + 8:].strip()
 
         if thinking and native_thinking:
             t = str(thinking).strip()
@@ -2795,6 +2821,7 @@ def run_agent(
                     })
                     format_retry_turns += 1
                     continue
+                _emit_agent_end_on_error("error: forced tool choice mismatch")
                 return "error: forced tool choice mismatch", messages
             forced_tool_choice = None
 
@@ -2813,6 +2840,7 @@ def run_agent(
                     continue
                 # Exhausted retries — return error, never treat analysis as final content
                 logging_hook.log_event("analysis_only_exhausted", {"turn": turns, "retries": format_retries})
+                _emit_agent_end_on_error("error: analysis-only output after retries exhausted")
                 return "error: analysis-only output after retries exhausted", messages
 
             if min_tool_calls and _metrics.tool_calls_total < min_tool_calls:
@@ -2858,6 +2886,7 @@ def run_agent(
                         logging_hook.log_event("forced_tool_call", {"turn": turns, "tool": resolved_name, "tool_display": display_name})
                         continue
 
+                _emit_agent_end_on_error("error: minimum tool calls not met")
                 return "error: minimum tool calls not met", messages
 
             if require_code_change and not code_change_made:
@@ -2876,6 +2905,7 @@ def run_agent(
                     logging_hook.log_event("format_retry", {"turn": turns, "reason": "code_change_required"})
                     format_retry_turns += 1
                     continue
+                _emit_agent_end_on_error("error: code change required")
                 return "error: code change required", messages
 
             # Final content
@@ -2911,10 +2941,10 @@ def run_agent(
         assistant_message: Dict[str, Any] = {"role": "assistant", "content": "", "tool_calls": tool_calls}
         # For "native" mode, include thinking directly in assistant message
         if native_thinking and thinking:
-            # GLM uses reasoning_content field, Harmony uses thinking field
-            if "glm" in MODEL.lower():
-                assistant_message["reasoning_content"] = thinking
-            else:
+            # Most templates expect reasoning_content (Kimi K2.5, DeepSeek, GLM)
+            assistant_message["reasoning_content"] = thinking
+            # Also set thinking field for compatibility (Harmony, etc.)
+            if "glm" not in MODEL.lower():
                 assistant_message["thinking"] = thinking
         tool_results: List[Dict[str, Any]] = []
 
