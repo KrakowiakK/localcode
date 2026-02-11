@@ -1101,8 +1101,6 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
         data=json.dumps(request_data).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    request_started_at = time.perf_counter()
-
     def _is_transient_request_error(exc: Exception) -> bool:
         text = str(exc).lower()
         transient_markers = (
@@ -1115,11 +1113,15 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
         return any(marker in text for marker in transient_markers)
 
     raw = b""
+    request_elapsed_s: Optional[float] = None
+    resp = None
     request_attempts = 2
     for attempt in range(1, request_attempts + 1):
+        attempt_started_at = time.perf_counter()
         try:
             resp = urllib.request.urlopen(req, timeout=300)
             raw = resp.read()
+            request_elapsed_s = max(time.perf_counter() - attempt_started_at, 1e-6)
             break
         except Exception as exc:
             should_retry = attempt < request_attempts and _is_transient_request_error(exc)
@@ -1151,7 +1153,8 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
     if request_id:
         payload["request_id"] = request_id
 
-    request_elapsed_s = max(time.perf_counter() - request_started_at, 1e-6)
+    if request_elapsed_s is None:
+        request_elapsed_s = 1e-6
 
     # Log usage, timings (TPS from llama-server), and request_id
     meta: Dict[str, Any] = {
