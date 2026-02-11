@@ -198,6 +198,7 @@ TASKS_CAPTURE_MODE: bool = False
 TASKS_CAPTURED: List[Dict[str, Any]] = []
 FLOW_STAGE_SIGNAL: Optional[Dict[str, Any]] = None
 FLOW_STAGE_EXPECTED: Optional[str] = None
+FINISH_SIGNAL: Optional[Dict[str, Any]] = None
 
 # ANSI colors
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
@@ -1204,6 +1205,32 @@ def _did_tool_make_change(tool_name: str, result: Any) -> bool:
     return False
 
 
+def _is_noop_write_result(result: str) -> bool:
+    """Check if a write/edit tool result indicates no actual change was made."""
+    if not isinstance(result, str):
+        return False
+    r = result.lower()
+    if "no changes needed" in r:
+        return True
+    if "no changes made" in r:
+        return True
+    if "already correct" in r:
+        return True
+    if "already has this content" in r:
+        return True
+    if "old and new are identical" in r:
+        return True
+    if "old and new are the same" in r:
+        return True
+    if "edit not applied" in r:
+        return True
+    if "no change \u2014" in r:
+        return True
+    if result.strip() == "ok":
+        return True
+    return False
+
+
 def get_available_write_tools(tools_dict: ToolsDict) -> List[str]:
     """Get list of available write tools from tools_dict using categories."""
     return [name for name in tools_dict if is_write_tool(name)]
@@ -1318,6 +1345,35 @@ def flow_stage_done(args: Dict[str, Any]) -> str:
         "payload_preview": str(payload)[:200],
     })
     return "ok: flow_stage_done recorded"
+
+
+def finish_run(args: Dict[str, Any]) -> str:
+    """Record a finish signal so the runtime can terminate cleanly."""
+    global FINISH_SIGNAL
+    data, err = _require_args_dict(args, "finish")
+    if err:
+        return err
+
+    status = str(data.get("status") or "done").strip().lower()
+    if status not in {"done", "blocked", "incomplete"}:
+        return "error: invalid status for finish (expected done|blocked|incomplete)"
+
+    summary_raw = data.get("summary")
+    summary = ""
+    if summary_raw is not None:
+        if not isinstance(summary_raw, str):
+            return "error: finish.summary must be a string"
+        summary = summary_raw.strip()
+
+    FINISH_SIGNAL = {
+        "status": status,
+        "summary": summary,
+    }
+    logging_hook.log_event("finish_called", {
+        "status": status,
+        "summary_preview": summary[:200],
+    })
+    return f"ok: finish recorded ({status})"
 
 
 def _collect_parent_summary(messages: List[Dict[str, Any]], max_messages: int = 6, max_chars: int = 1200) -> str:
@@ -1529,8 +1585,9 @@ def run_agent(
     previous_messages: Optional[List[Dict[str, Any]]] = None,
     task_depth: int = 0,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    global LAST_RUN_SUMMARY, CURRENT_MESSAGES
+    global LAST_RUN_SUMMARY, CURRENT_MESSAGES, FINISH_SIGNAL
     LAST_RUN_SUMMARY = None
+    FINISH_SIGNAL = None
 
     task_branching = bool(agent_settings.get("task_branching", False)) and task_depth == 0
     task_flow_mode = str(agent_settings.get("task_flow_mode", "branched") or "branched").strip().lower()
@@ -1611,6 +1668,8 @@ def run_agent(
     code_change_made = False
     code_change_retries = 0
     forced_tool_choice: Optional[str] = None
+    write_nudge_sent = False
+    consecutive_noop_turns = 0
 
     native_thinking = bool(agent_settings.get("native_thinking", False))
 
@@ -2770,6 +2829,15 @@ def run_agent(
             logging_hook.log_event("analysis_artifact_normalized", {"turn": turns, "original_len": len(raw_content)})
             _metrics.analysis_retries += 1
         tool_calls = message.get("tool_calls", []) or []
+        # Enforce max_batch_tool_calls — truncate excess tool calls
+        max_batch = int(agent_settings.get("request_overrides", {}).get("max_batch_tool_calls", 0) or 0)
+        if max_batch > 0 and len(tool_calls) > max_batch:
+            logging_hook.log_event("batch_truncated", {
+                "turn": turns,
+                "original": len(tool_calls),
+                "kept": max_batch,
+            })
+            tool_calls = tool_calls[:max_batch]
         thinking = message.get("thinking")
         if not thinking:
             thinking = message.get("reasoning_content")
@@ -2951,6 +3019,8 @@ def run_agent(
         feedback_text = None
         feedback_reason = None
         plan_tasks_created = False
+        finish_requested = False
+        finish_payload: Dict[str, Any] = {}
         for tc in tool_calls:
             # Hook: tool_before (mutable — hooks can modify tool_args)
             tc_display_name = (tc.get("function") or {}).get("name") or ""
@@ -3050,11 +3120,50 @@ def run_agent(
                 "content": result,
             })
 
+            if resolved_name == "finish":
+                finish_requested = True
+                if isinstance(FINISH_SIGNAL, dict):
+                    finish_payload = dict(FINISH_SIGNAL)
+                break
+
             if feedback_text:
                 break
 
         messages.append(assistant_message)
         messages.extend(tool_results)
+
+        if finish_requested and not feedback_text:
+            if require_code_change and not code_change_made:
+                feedback_text = (
+                    "FORMAT ERROR: finish called before any confirmed code change. "
+                    "Use write/edit/apply_patch to make the required change, then call finish."
+                )
+                feedback_reason = "code_change_required_before_finish"
+            else:
+                content = str(finish_payload.get("summary") or "").strip() or "done"
+                if _is_benchmark_mode() and benchmark_output_mode == "runtime" and task_depth == 0:
+                    content = _benchmark_final_output(CONTINUE_SESSION)
+                print(f"\n{CYAN}⏺{RESET} {content}")
+                hooks.emit("response_content", {"content": content, "turn": turns})
+
+                summary = _metrics.summary()
+                LAST_RUN_SUMMARY = summary
+                logging_hook.log_event("agent_done", {"turns": turns, **summary, "message_summary": summarize_messages(messages)})
+
+                end_data = hooks.emit("agent_end", {
+                    "summary": summary,
+                    "messages": messages,
+                    "content": content,
+                    "turns": turns,
+                    "log_path": logging_hook.get_log_path(),
+                    "system_prompt": system_prompt,
+                    "phase_log_mode": phase_log_mode,
+                })
+                dump_info = end_data.get("conversation_dump")
+                if dump_info:
+                    logging_hook.log_event("conversation_saved", dump_info)
+
+                return content, messages
 
         if phase_enabled:
             turn_reads = _extract_task_reads([assistant_message])
@@ -3120,6 +3229,25 @@ def run_agent(
                 if lines:
                     lines[0] = f"{lines[0]} (attempt {attempt_num})"
                     feedback_text = "\n".join(lines)
+
+            # Hard stop guard: repeated no-op writes can trap weaker models forever.
+            # End the run after several repeated-noop feedback cycles.
+            if feedback_reason == "write_repeated_noop" and attempt_num and attempt_num >= 3:
+                summary = _metrics.summary()
+                LAST_RUN_SUMMARY = summary
+                logging_hook.log_event("write_noop_guard_stop", {
+                    "turn": turns,
+                    "attempt": attempt_num,
+                    **summary,
+                })
+                final_content = ""
+                if _is_benchmark_mode() and benchmark_output_mode == "runtime" and task_depth == 0:
+                    final_content = _benchmark_final_output(CONTINUE_SESSION)
+                    print(f"\n{CYAN}⏺{RESET} {final_content}")
+                    hooks.emit("response_content", {"content": final_content, "turn": turns})
+                _emit_agent_end_on_error("ok: completed (write noop guard)")
+                return final_content, messages
+
             # Hook: tool_feedback (mutable — hooks can modify feedback_text)
             fb_data = hooks.emit("tool_feedback", {
                 "tool_name": feedback_reason or "tool_error_feedback",
@@ -3140,6 +3268,60 @@ def run_agent(
             # Hook: turn_end
             hooks.emit("turn_end", {"turn": turns, "tool_count": len(tool_calls), "errors": _metrics.tool_errors_total})
             continue
+
+        # Write nudge: remind model to write if running low on turns without code change
+        if (require_code_change and not code_change_made and not write_nudge_sent):
+            effective_turns = turns - format_retry_turns
+            nudge_threshold = max(5, agent_max_turns // 3)
+            if effective_turns >= nudge_threshold:
+                write_nudge_sent = True
+                remaining = agent_max_turns - effective_turns
+                available_write_tools = get_available_write_tools(tools_dict)
+                tools_str = "/".join(available_write_tools) if available_write_tools else "write_file"
+                nudge_msg = (
+                    f"IMPORTANT: You have used {effective_turns} of {agent_max_turns} turns without writing code. "
+                    f"You have {remaining} turns left. Use {tools_str} NOW to implement your solution."
+                )
+                messages.append({"role": "user", "content": nudge_msg})
+                logging_hook.log_event("write_nudge", {
+                    "turn": turns,
+                    "effective_turn": effective_turns,
+                    "remaining": remaining,
+                })
+
+        # Noop force-stop: end early if model is stuck in noop edit loop
+        if code_change_made and not feedback_text and tool_calls:
+            turn_all_noop = (
+                len(tool_results) > 0
+                and all(
+                    _is_noop_write_result(tr.get("content", ""))
+                    for tr in tool_results
+                    if is_write_tool(resolve_tool_name(tr.get("name", "")))
+                )
+                and any(
+                    is_write_tool(resolve_tool_name(tr.get("name", "")))
+                    for tr in tool_results
+                )
+            )
+            if turn_all_noop:
+                consecutive_noop_turns += 1
+            else:
+                consecutive_noop_turns = 0
+            if consecutive_noop_turns >= 3:
+                summary = _metrics.summary()
+                LAST_RUN_SUMMARY = summary
+                logging_hook.log_event("noop_force_stop", {
+                    "turn": turns,
+                    "consecutive": consecutive_noop_turns,
+                    **summary,
+                })
+                final_content = ""
+                if _is_benchmark_mode() and benchmark_output_mode == "runtime" and task_depth == 0:
+                    final_content = _benchmark_final_output(CONTINUE_SESSION)
+                    print(f"\n{CYAN}⏺{RESET} {final_content}")
+                    hooks.emit("response_content", {"content": final_content, "turn": turns})
+                _emit_agent_end_on_error("ok: completed (noop force stop)")
+                return final_content, messages
 
 
 def run_once(prompt: str, system_prompt: str, tools_dict: ToolsDict) -> None:
@@ -3337,6 +3519,7 @@ if __name__ == "__main__":
         "ls": ls_fn,
         "plan_tasks": plan_tasks,
         "flow_stage_done": flow_stage_done,
+        "finish": finish_run,
     }
 
     # Dynamically register model_call handlers from tool JSON configs

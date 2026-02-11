@@ -242,19 +242,6 @@ def apply_patch_fn(args: Any) -> str:
                     "a different patch with correct context, or switch to edit/write."
                 )
 
-        # First pass: validate update files were read
-        idx = 1
-        while idx < len(lines):
-            line = lines[idx]
-            if line.strip() == "*** End Patch":
-                break
-            if line.startswith("*** Update File: "):
-                raw_path = line[len("*** Update File: "):].strip()
-                path = _validate_path(raw_path, check_exists=True)
-                if path not in FILE_VERSIONS:
-                    return f"error: must read {raw_path} before patching (use read tool first)"
-            idx += 1
-
         idx = 1
         files_changed: List[str] = []
         additions = 0

@@ -2,7 +2,7 @@
   "name": "write",
   "aliases": ["write_file"],
   "category": "write",
-  "description": "Create or overwrite file. Creates parent directories if needed.\n\nPREFER {{tool:write}} when:\n- Creating new files\n- File is small (<50 lines) - simpler than patching\n- Rewriting most of file content\n- After {{tool:apply_patch}}/{{tool:edit}} failure\n\nWORKFLOW:\n1. {{tool:read}} file first to see current content\n2. Include ALL content you want in the file (write overwrites completely)\n3. Do NOT guess content - copy unchanged parts from read output\n\nExamples:\n- {{tool:write}}({\"path\": \"config.json\", \"content\": \"{\\\"debug\\\": true}\"})\n- {{tool:write}}({\"path\": \"app.js\", \"content\": \"...\"})\n\nReturns: ok: created/updated path, +N lines",
+  "description": "Create or overwrite a file. Parent directories are created automatically.\n\nUseful for:\n- creating new files\n- full rewrites\n- resolving patch/edit failures on small files\n\nAccepted arg aliases:\n- file / filename / file_path / filepath / file_name -> path\n- text / data / code / body / source -> content\n\nNotes:\n- This operation replaces the full file content.\n- Include all content you want to keep.\n\nExamples:\n- {{tool:write}}({\"path\": \"config.json\", \"content\": \"{\\\"debug\\\": true}\"})\n- {{tool:write}}({\"file\": \"app.js\", \"code\": \"...full file...\"})\n\nReturns: ok: created/updated path, +N lines",
   "additionalProperties": false,
   "parameters": {
     "path": "string",

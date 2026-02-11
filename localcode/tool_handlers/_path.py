@@ -88,6 +88,18 @@ def _is_benchmark_mode() -> bool:
     return bool(os.environ.get("BENCHMARK_DIR") or os.environ.get("AIDER_DOCKER"))
 
 
+def _find_file_in_sandbox(filename: str) -> Optional[str]:
+    """Try to find a file by name within the sandbox directory."""
+    sandbox = _state.SANDBOX_ROOT
+    if not sandbox or not filename:
+        return None
+    for root, dirs, files in os.walk(sandbox):
+        dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS]
+        if filename in files:
+            return os.path.join(root, filename)
+    return None
+
+
 def _should_block_test_edit(path: str) -> bool:
     override = str(os.environ.get("LOCALCODE_BLOCK_TEST_EDITS", "")).strip().lower()
     if override:

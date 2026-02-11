@@ -120,6 +120,18 @@ class TestReadTool(unittest.TestCase):
         result = agent.read({"path": self.test_file, "limit": 0})
         self.assertIn("limit must be >=", result.lower())
 
+    def test_read_notes_companion_spec_for_skeleton(self):
+        js_file = os.path.join(self.temp_dir, "react.js")
+        spec_file = os.path.join(self.temp_dir, "react.spec.js")
+        with open(js_file, "w") as f:
+            f.write("throw new Error('Remove this statement and implement this function');\n")
+        with open(spec_file, "w") as f:
+            f.write("describe('x', () => {})\n")
+
+        result = agent.read({"path": js_file})
+        self.assertIn("companion test file exists", result)
+        self.assertIn("react.spec.js", result)
+
 
 class TestWriteTool(unittest.TestCase):
     """Test write tool."""
@@ -167,7 +179,7 @@ class TestEditTool(unittest.TestCase):
         self.test_file = os.path.join(self.temp_dir, "test.txt")
         with open(self.test_file, "w") as f:
             f.write("hello world\nfoo bar\n")
-        # Must read file first (edit requires it)
+        # Seed read history for tests that assume previously-read context.
         agent.FILE_VERSIONS[self.test_file] = "hello world\nfoo bar\n"
 
     def tearDown(self):
@@ -202,12 +214,28 @@ class TestEditTool(unittest.TestCase):
             "old": "content",
             "new": "new content"
         })
-        self.assertIn("error", result.lower())
-        self.assertIn("read", result.lower())
+        self.assertIn("ok:", result.lower())
 
     def test_edit_invalid_args_type(self):
         result = agent.edit("not a dict")
         self.assertIn("invalid arguments", result.lower())
+
+
+class TestFinishTool(unittest.TestCase):
+    """Test finish tool behavior."""
+
+    def test_finish_records_signal(self):
+        result = agent.finish_run({"status": "done", "summary": "all good"})
+        self.assertTrue(result.startswith("ok:"), f"Expected ok, got: {result}")
+        self.assertIn("finish recorded (done)", result)
+
+    def test_finish_invalid_status(self):
+        result = agent.finish_run({"status": "weird"})
+        self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
+
+    def test_finish_summary_must_be_string(self):
+        result = agent.finish_run({"summary": 123})
+        self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
 
 
 class TestShellTool(unittest.TestCase):
@@ -666,6 +694,18 @@ class TestProcessToolCall(unittest.TestCase):
         _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
         self.assertEqual(result, "ok")
         self.assertEqual(args["line_end"], 105)
+
+    def test_process_tool_call_alias_query_maps_to_grep_pat(self):
+        tools_dict = {"grep": ("grep", {"pat": "string", "path": "string?"}, lambda a: f"ok:{a.get('pat')}")}
+        tool_call = {
+            "function": {
+                "name": "grep",
+                "arguments": "{\"query\":\"needle\",\"path\":\".\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(args.get("pat"), "needle")
+        self.assertEqual(result, "ok:needle")
 
 
 class TestToolSchema(unittest.TestCase):
@@ -1283,7 +1323,7 @@ class TestNoopDetection(unittest.TestCase):
         agent.FILE_VERSIONS.clear()
 
     def test_write_noop_first_returns_ok(self):
-        """First no-op write returns ok with 'no changes' (benchmark-fair)."""
+        """First no-op write returns ok with no-change guidance."""
         path = os.path.join(self.temp_dir, "test.txt")
         with open(path, "w") as f:
             f.write("hello")
@@ -1292,7 +1332,7 @@ class TestNoopDetection(unittest.TestCase):
         self.assertIn("no changes", result.lower())
 
     def test_write_noop_second_returns_error(self):
-        """Second consecutive no-op write returns error."""
+        """Second consecutive no-op write returns error (anti-loop)."""
         path = os.path.join(self.temp_dir, "test.txt")
         with open(path, "w") as f:
             f.write("hello")
@@ -1302,7 +1342,7 @@ class TestNoopDetection(unittest.TestCase):
         # Second no-op → error
         result2 = agent.write({"path": path, "content": "hello"})
         self.assertTrue(result2.startswith("error:"), f"Expected error on second noop, got: {result2}")
-        self.assertIn("no changes", result2.lower())
+        self.assertIn("repeated no-op write", result2.lower())
 
     def test_write_new_file_ok(self):
         path = os.path.join(self.temp_dir, "new.txt")
@@ -1325,7 +1365,53 @@ class TestNoopDetection(unittest.TestCase):
         agent.FILE_VERSIONS[path] = "hello world\n"
         result = agent.edit({"path": path, "old": "hello", "new": "hello"})
         self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
-        self.assertIn("old_string equals new_string", result)
+        self.assertIn("old equals new", result)
+
+    def test_run_agent_stops_on_repeated_write_noop_feedback(self):
+        calls = {"n": 0}
+
+        def fake_call_api(messages, system_prompt, tools_dict, request_overrides=None):
+            calls["n"] += 1
+            return {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": f"call_{calls['n']}",
+                            "type": "function",
+                            "function": {
+                                "name": "write",
+                                "arguments": json.dumps({"path": "react.js", "content": "same"}),
+                            },
+                        }],
+                    }
+                }],
+                "usage": {},
+            }
+
+        def fake_process_tool_call(tools_dict, tool_call):
+            return (
+                "write",
+                {"path": "react.js", "content": "same"},
+                "error: repeated no-op write for react.js. Write different content, or call finish if implementation is already correct.",
+                "write",
+            )
+
+        tools_dict = {"write": ("write", {"path": "string", "content": "string"}, lambda *_args, **_kwargs: "ok")}
+        agent_settings = {
+            "request_overrides": {},
+            "min_tool_calls": 0,
+            "max_format_retries": 0,
+            "require_code_change": False,
+            "max_turns": 50,
+        }
+
+        with patch("localcode.localcode.call_api", side_effect=fake_call_api), \
+             patch("localcode.localcode.process_tool_call", side_effect=fake_process_tool_call):
+            content, _messages = agent.run_agent("prompt", "system", tools_dict, agent_settings)
+
+        self.assertEqual(content, "")
+        self.assertLessEqual(calls["n"], 3, f"Expected early stop, got {calls['n']} turns")
 
 
 class TestApplyPatchNoopDetection(unittest.TestCase):
@@ -1673,7 +1759,7 @@ class TestWriteHintOnSecondNoop(unittest.TestCase):
         _inner._NOOP_COUNTS.clear()
 
     def test_hint_appears_on_second_noop(self):
-        """noop_n==2 error message should include the hint about writing different content."""
+        """Second no-op write should include repeated-noop guidance."""
         path = os.path.join(self.temp_dir, "test.txt")
         with open(path, "w") as f:
             f.write("hello")
@@ -1681,7 +1767,7 @@ class TestWriteHintOnSecondNoop(unittest.TestCase):
         agent.write({"path": path, "content": "hello"})
         # Second noop → error with hint
         result = agent.write({"path": path, "content": "hello"})
-        self.assertIn("written identical content multiple times", result)
+        self.assertIn("repeated no-op write", result)
 
 
 class TestShellEnvVarPrefix(unittest.TestCase):
@@ -3317,4 +3403,3 @@ class TestMakeModelCallHandlerSelfBatch(unittest.TestCase):
         handler = self._make_handler()
         result = handler({"questions": ["q1"]})
         self.assertEqual(result, "ok")
-

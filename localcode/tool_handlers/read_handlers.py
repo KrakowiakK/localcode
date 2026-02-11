@@ -15,7 +15,14 @@ from localcode.tool_handlers._state import (
     _require_args_dict,
     _track_file_version,
 )
-from localcode.tool_handlers._path import _validate_path
+from localcode.tool_handlers._path import _find_file_in_sandbox, _validate_path
+
+
+def _tool_hints_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_TOOL_HINTS", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
 
 
 def read(args: Any) -> str:
@@ -25,7 +32,17 @@ def read(args: Any) -> str:
     try:
         path = _validate_path(args.get("path"), check_exists=True)
     except ValueError as e:
-        return f"error: {e}"
+        # Path auto-correction: try finding file by name in sandbox
+        original_path = args.get("path", "")
+        filename = os.path.basename(original_path) if original_path else ""
+        corrected = _find_file_in_sandbox(filename) if filename else None
+        if corrected:
+            try:
+                path = _validate_path(corrected, check_exists=True)
+            except ValueError:
+                return f"error: {e}"
+        else:
+            return f"error: {e}"
 
     try:
         stat = os.stat(path)
@@ -84,7 +101,7 @@ def read(args: Any) -> str:
         offset = start_line - 1
 
         if offset >= total_lines:
-            return f"error: line_start {start_line} is out of range (file has {total_lines} lines)"
+            return f"File already fully read ({total_lines} lines). No more content. Proceed with your implementation."
 
         if end_line is not None:
             if end_line < start_line:
@@ -111,7 +128,7 @@ def read(args: Any) -> str:
         if offset < 0:
             return "error: offset must be >= 0"
         if offset >= total_lines:
-            return f"error: offset {offset} is out of range (file has {total_lines} lines)"
+            return f"File already fully read ({total_lines} lines). No more content. Proceed with your implementation."
         if limit < 1:
             return "error: limit must be >= 1"
         limit = min(limit, total_lines - offset)
@@ -130,7 +147,62 @@ def read(args: Any) -> str:
     if lines_shown < total_lines:
         output += f"\n(... {total_lines - lines_shown} more lines, use offset={lines_shown} to continue)"
 
+    note = _context_note_after_read(path, content)
+    if note:
+        output += f"\n\n{note}"
+
+    # Optional hinting (off by default to avoid steering model workflow).
+    if _tool_hints_enabled():
+        hint = _next_step_hint_after_read(path)
+        if hint:
+            output += f"\n\n{hint}"
+
     return output
+
+
+def _next_step_hint_after_read(path: str) -> str:
+    """Return an optional neutral hint based on what file was read."""
+    basename = os.path.basename(path)
+    is_spec = basename.endswith(('.spec.js', '.test.js'))
+    is_source = basename.endswith('.js') and not is_spec
+
+    if is_spec:
+        source_name = basename.replace('.spec.js', '.js').replace('.test.js', '.js')
+        return f"Hint: test expectations are visible. If needed, inspect {source_name} before editing."
+
+    if is_source:
+        from localcode.tool_handlers._state import WRITTEN_PATHS
+        source_written = any(
+            p.endswith('.js') and not os.path.basename(p).endswith(('.spec.js', '.test.js'))
+            for p in WRITTEN_PATHS
+        )
+        if source_written:
+            return "Hint: if implementation looks correct, finish; otherwise apply a targeted change."
+        else:
+            return "Hint: choose any suitable write tool to implement required behavior."
+
+    return ""
+
+
+def _context_note_after_read(path: str, content: str) -> str:
+    """Return lightweight context notes that may improve model decisions."""
+    basename = os.path.basename(path)
+    if not basename.endswith(".js"):
+        return ""
+    if basename.endswith((".spec.js", ".test.js")):
+        return ""
+
+    if "Remove this statement and implement this function" not in content:
+        return ""
+
+    stem = basename[:-3]
+    parent = os.path.dirname(path) or "."
+    candidates = [f"{stem}.spec.js", f"{stem}.test.js"]
+    for cand in candidates:
+        cand_path = os.path.join(parent, cand)
+        if os.path.exists(cand_path):
+            return f"Note: companion test file exists: {cand}. Read it if behavior details are unclear."
+    return ""
 
 
 def batch_read(args: Any) -> str:

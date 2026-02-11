@@ -65,7 +65,12 @@ FEEDBACK_RULES: List[Dict[str, Any]] = [
     },
     {
         "tool": "edit",
-        "match": "old_string not found",
+        "match_fn": lambda r: (
+            "old_string not found" in r
+            or "old text was not found" in r
+            or "'old' text was not found" in r
+            or "old text not found" in r
+        ),
         "reason": "old_string_not_found",
         "build": "_build_old_string_not_found",
     },
@@ -77,7 +82,11 @@ FEEDBACK_RULES: List[Dict[str, Any]] = [
     },
     {
         "tool": "edit",
-        "match_fn": lambda r: "no changes" in r and "old_string equals new_string" in r,
+        "match_fn": lambda r: (
+            ("no changes" in r and "old_string equals new_string" in r)
+            or ("no changes" in r and "old equals new" in r)
+            or ("old and new are identical" in r)
+        ),
         "reason": "old_equals_new",
         "build": "_build_old_equals_new",
     },
@@ -98,6 +107,21 @@ FEEDBACK_RULES: List[Dict[str, Any]] = [
         "match": "no changes",
         "reason": "write_noop",
         "build": "_build_write_noop",
+    },
+    {
+        "tool": ("write", "write_file"),
+        "match": "repeated no-op write",
+        "reason": "write_repeated_noop",
+        "build": "_build_write_repeated_noop",
+    },
+    {
+        "tool": ("write", "write_file"),
+        "match_fn": lambda r: (
+            "missing required parameter(s) for tool 'write'" in r
+            and "content" in r
+        ),
+        "reason": "write_missing_content",
+        "build": "_build_write_missing_content",
     },
     {
         "tool": "read",
@@ -329,7 +353,25 @@ def _build_write_noop(data: Dict[str, Any]) -> str:
     return _bft(data.get("tool_name", "write"), "write_noop", (
         f"FORMAT ERROR: {write_tool} wrote identical content (no-op).\n"
         f"ACTION: {read_tool}(path) then {write_tool} with DIFFERENT content, "
-        f"or use {edit_tool} to change a specific part."
+        f"or use {edit_tool} to change a specific part. If already correct, call finish."
+    ))
+
+
+def _build_write_repeated_noop(data: Dict[str, Any]) -> str:
+    write_tool = _dn("write")
+    return _bft(data.get("tool_name", "write"), "write_repeated_noop", (
+        f"LOOP GUARD: repeated no-op {write_tool} calls detected.\n"
+        "ACTION: do not repeat the same write again.\n"
+        "Use different content for a real fix, or call finish if implementation is already correct."
+    ))
+
+
+def _build_write_missing_content(data: Dict[str, Any]) -> str:
+    write_tool = _dn("write")
+    return _bft(data.get("tool_name", "write"), "write_missing_content", (
+        f"FORMAT ERROR: {write_tool} requires both path and content.\n"
+        f"ACTION: call {write_tool} with a complete JSON object containing both fields.\n"
+        "If this was an accidental duplicate call after a successful write, skip it and continue."
     ))
 
 
@@ -415,6 +457,8 @@ _BUILDERS: Dict[str, Callable] = {
     "_build_patch_noop": _build_patch_noop,
     "_build_patch_repeated": _build_patch_repeated,
     "_build_write_noop": _build_write_noop,
+    "_build_write_repeated_noop": _build_write_repeated_noop,
+    "_build_write_missing_content": _build_write_missing_content,
     "_build_read_is_directory": _build_read_is_directory,
     "_build_read_file_not_found": _build_read_file_not_found,
     "_build_invalid_regex": _build_invalid_regex,
@@ -434,9 +478,13 @@ def _rule_matches(rule: Dict[str, Any], tool_name: str, result_text: str) -> boo
     elif tool_name != rule_tool:
         return False
 
+    result_lc = result_text.lower()
     if "match_fn" in rule:
-        return rule["match_fn"](result_text)
-    return rule.get("match", "") in result_text
+        return rule["match_fn"](result_lc)
+    needle = rule.get("match", "")
+    if not isinstance(needle, str):
+        return False
+    return needle.lower() in result_lc
 
 
 def on_tool_after(data: Dict[str, Any]) -> Dict[str, Any]:

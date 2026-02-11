@@ -54,6 +54,12 @@ _LAST_PATCH_HASH: Dict[str, str] = {}
 # Track consecutive no-op counts per file per tool
 _NOOP_COUNTS: Dict[str, Dict[str, int]] = {}  # {path: {"apply_patch": N, "write": N}}
 
+# Track files written via write_file (for next-step hints in read)
+WRITTEN_PATHS: set = set()
+
+# Track total tool calls per session (for urgency escalation hints)
+TOOL_CALL_COUNT: int = 0
+
 # Extract the first file path from a unified patch block.
 _PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Update File|Add File|Delete File):\s+(.+)$", re.MULTILINE)
 
@@ -76,8 +82,11 @@ def _require_args_dict(args: Any, tool_name: str) -> Tuple[Optional[Dict[str, An
 
 
 def _reset_noop_tracking() -> None:
+    global TOOL_CALL_COUNT
     _LAST_PATCH_HASH.clear()
     _NOOP_COUNTS.clear()
+    WRITTEN_PATHS.clear()
+    TOOL_CALL_COUNT = 0
 
 
 def _read_file_bytes(path: str) -> Optional[bytes]:

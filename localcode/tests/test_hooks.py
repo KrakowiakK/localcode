@@ -113,6 +113,16 @@ class TestFeedbackHook:
         result = hooks.emit("tool_after", data)
         assert result["feedback_reason"] == "old_string_not_found"
 
+    def test_old_text_not_found_variant(self):
+        data = {
+            "tool_name": "edit",
+            "result": "error: old text was not found in foo.js",
+            "is_error": True,
+            "path_value": "/foo/bar.py",
+        }
+        result = hooks.emit("tool_after", data)
+        assert result["feedback_reason"] == "old_string_not_found"
+
     def test_no_match_on_success(self):
         data = {
             "tool_name": "read",
@@ -131,6 +141,24 @@ class TestFeedbackHook:
         result = hooks.emit("tool_after", data)
         assert result["feedback_reason"] == "write_noop"
 
+    def test_write_repeated_noop(self):
+        data = {
+            "tool_name": "write",
+            "result": "error: repeated no-op write for react.js. Write different content, or call finish if implementation is already correct.",
+            "is_error": True,
+        }
+        result = hooks.emit("tool_after", data)
+        assert result["feedback_reason"] == "write_repeated_noop"
+
+    def test_write_missing_content(self):
+        data = {
+            "tool_name": "write",
+            "result": "error: missing required parameter(s) for tool 'write': content. Example: write({\"path\": \"...\", \"content\": \"...\"})",
+            "is_error": True,
+        }
+        result = hooks.emit("tool_after", data)
+        assert result["feedback_reason"] == "write_missing_content"
+
     def test_invalid_regex(self):
         data = {
             "tool_name": "grep",
@@ -143,7 +171,7 @@ class TestFeedbackHook:
     def test_must_read_before_patching(self):
         data = {
             "tool_name": "apply_patch",
-            "result": "error: must read file before patching",
+            "result": "error: MUST READ file BEFORE PATCHING",
             "is_error": True,
             "path_value": "/foo.py",
         }
@@ -154,6 +182,16 @@ class TestFeedbackHook:
         data = {
             "tool_name": "edit",
             "result": "error: no changes - old_string equals new_string",
+            "is_error": True,
+            "path_value": "/foo.py",
+        }
+        result = hooks.emit("tool_after", data)
+        assert result["feedback_reason"] == "old_equals_new"
+
+    def test_old_equals_new_variant(self):
+        data = {
+            "tool_name": "edit",
+            "result": "error: no changes - old equals new in foo.js",
             "is_error": True,
             "path_value": "/foo.py",
         }
@@ -191,6 +229,11 @@ class TestFeedbackHook:
         rule = {"tool": "edit", "match_fn": lambda r: "must read" in r and "before editing" in r, "reason": "x", "build": "y"}
         assert _rule_matches(rule, "edit", "error: must read file before editing")
         assert not _rule_matches(rule, "edit", "error: must read file")
+
+    def test_rule_matches_case_insensitive_match(self):
+        from localcode.middleware.feedback_hook import _rule_matches
+        rule = {"tool": "read", "match": "file not found", "reason": "x", "build": "y"}
+        assert _rule_matches(rule, "read", "ERROR: File Not Found")
 
 
 class TestMetricsHook:

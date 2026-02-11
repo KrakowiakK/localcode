@@ -11,6 +11,7 @@ from localcode.tool_handlers._state import (
     TOOL_DISPLAY_MAP,
     UNSUPPORTED_TOOLS,
 )
+from localcode.tool_handlers import _state as _state_mod
 from localcode.middleware import logging_hook
 
 
@@ -54,6 +55,90 @@ _NUMBER_WORDS = {
 _TOOL_ARG_NUMBER_FIELDS = {
     "read": {"line_start", "line_end", "offset", "limit"},
 }
+
+
+# ---------------------------
+# Argument alias mapping (small-model friendly)
+# ---------------------------
+# Maps common alternative parameter names to the canonical names.
+# This allows small models to use names like "file" instead of "path"
+# without getting validation errors.
+
+_ARG_ALIASES: Dict[str, Dict[str, str]] = {
+    "read": {
+        "file": "path", "filename": "path", "file_path": "path",
+        "filepath": "path", "file_name": "path",
+    },
+    "write": {
+        "file": "path", "filename": "path", "file_path": "path",
+        "filepath": "path", "file_name": "path",
+        "text": "content", "data": "content", "code": "content",
+        "body": "content", "source": "content",
+    },
+    "edit": {
+        "file": "path", "filename": "path", "file_path": "path",
+        "filepath": "path", "file_name": "path",
+        "old_string": "old", "old_text": "old", "search": "old",
+        "find": "old", "original": "old", "before": "old",
+        "new_string": "new", "new_text": "new", "replace": "new",
+        "replacement": "new", "after": "new",
+    },
+    "glob": {
+        "pattern": "pat", "glob_pattern": "pat", "search": "pat",
+        "file": "path", "dir": "path", "directory": "path",
+        "folder": "path", "root": "path",
+    },
+    "grep": {
+        "query": "pat", "search": "pat", "text": "pat",
+        "regex": "pat", "pattern": "pat",
+        "file": "path", "dir": "path", "directory": "path",
+        "folder": "path",
+    },
+    "search": {
+        "query": "pattern", "text": "pattern", "regex": "pattern",
+        "pat": "pattern",
+        "file": "path", "dir": "path",
+    },
+}
+
+
+def _normalize_arg_names(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Remap alternative argument names to canonical names for a given tool."""
+    aliases = _ARG_ALIASES.get(tool_name)
+    if not aliases:
+        return args
+    normalized = {}
+    for key, value in args.items():
+        canonical = aliases.get(key.lower(), key)
+        # Don't overwrite if canonical key already present
+        if canonical in normalized:
+            continue
+        normalized[canonical] = value
+    return normalized
+
+
+# ---------------------------
+# JSON repair for malformed tool arguments
+# ---------------------------
+
+def _repair_json(raw: str) -> str:
+    """Try to fix common JSON errors from small models."""
+    if not raw or not raw.strip():
+        return raw
+    s = raw.strip()
+    # Fix trailing commas before } or ]
+    s = re.sub(r',\s*([}\]])', r'\1', s)
+    # Fix single quotes → double quotes (simple heuristic: only if no double quotes in values)
+    if "'" in s and '"' not in s:
+        s = s.replace("'", '"')
+    # Fix missing closing brace
+    opens = s.count('{') - s.count('}')
+    if opens > 0:
+        s += '}' * opens
+    opens_bracket = s.count('[') - s.count(']')
+    if opens_bracket > 0:
+        s += ']' * opens_bracket
+    return s
 
 
 def _parse_number_words(text: str) -> Optional[int]:
@@ -145,11 +230,19 @@ def _validate_tool_args(tool_name: str, args: Any, params: Optional[Dict[str, st
 
     unknown = sorted(set(args.keys()) - set(params.keys()))
     if unknown:
-        return f"error: unknown parameter(s) for tool '{tool_name}': {', '.join(unknown)}"
+        valid_params = sorted(params.keys())
+        return (
+            f"error: unknown parameter(s) for tool '{tool_name}': {', '.join(unknown)}. "
+            f"Valid parameters: {', '.join(valid_params)}"
+        )
 
     missing = sorted(set(required) - set(args.keys()))
     if missing:
-        return f"error: missing required parameter(s) for tool '{tool_name}': {', '.join(missing)}"
+        example_args = {p: "..." for p in required}
+        return (
+            f"error: missing required parameter(s) for tool '{tool_name}': {', '.join(missing)}. "
+            f"Example: {tool_name}({json.dumps(example_args)})"
+        )
 
     for key, value in args.items():
         base_type, optional = type_map.get(key, (None, False))
@@ -223,27 +316,34 @@ def process_tool_call(tools_dict: ToolsDict, tc: Dict[str, Any]) -> Tuple[str, D
         try:
             tool_args = json.loads(raw_args) if raw_args else {}
         except json.JSONDecodeError as exc:
-            if resolved == "apply_patch":
-                patch = _extract_patch_block(str(raw_args))
-                if patch:
-                    tool_args = {"patch": patch}
+            # Stage 1: try JSON repair (trailing commas, single quotes, missing braces)
+            repaired_json = _repair_json(str(raw_args))
+            json_repaired = False
+            if repaired_json != raw_args:
+                try:
+                    tool_args = json.loads(repaired_json)
+                    json_repaired = True
                     logging_hook.log_event("format_repair", {
-                        "tool": "apply_patch",
-                        "reason": "patch_block_recover",
+                        "tool": resolved,
+                        "reason": "json_repair",
                     })
-                else:
-                    repaired = _repair_number_word_args(
-                        str(raw_args),
-                        _TOOL_ARG_NUMBER_FIELDS.get(resolved, set()),
-                    )
-                    if repaired != raw_args:
-                        try:
-                            tool_args = json.loads(repaired)
-                        except json.JSONDecodeError:
-                            return resolved, {}, f"error: invalid JSON in tool arguments after repair: {exc}. Raw: {str(original_raw_args)[:100]}", tool_name
-                    else:
-                        return resolved, {}, f"error: invalid JSON in tool arguments: {exc}. Raw: {str(original_raw_args)[:100]}", tool_name
-            else:
+                except json.JSONDecodeError:
+                    pass
+
+            if not json_repaired:
+                # Stage 2: try patch block extraction for apply_patch
+                if resolved == "apply_patch":
+                    patch = _extract_patch_block(str(raw_args))
+                    if patch:
+                        tool_args = {"patch": patch}
+                        json_repaired = True
+                        logging_hook.log_event("format_repair", {
+                            "tool": "apply_patch",
+                            "reason": "patch_block_recover",
+                        })
+
+            if not json_repaired:
+                # Stage 3: try number word repair
                 repaired = _repair_number_word_args(
                     str(raw_args),
                     _TOOL_ARG_NUMBER_FIELDS.get(resolved, set()),
@@ -251,10 +351,12 @@ def process_tool_call(tools_dict: ToolsDict, tc: Dict[str, Any]) -> Tuple[str, D
                 if repaired != raw_args:
                     try:
                         tool_args = json.loads(repaired)
+                        json_repaired = True
                     except json.JSONDecodeError:
-                        return resolved, {}, f"error: invalid JSON in tool arguments after repair: {exc}. Raw: {str(original_raw_args)[:100]}", tool_name
-                else:
-                    return resolved, {}, f"error: invalid JSON in tool arguments: {exc}. Raw: {str(original_raw_args)[:100]}", tool_name
+                        pass
+
+            if not json_repaired:
+                return resolved, {}, f"error: invalid JSON in tool arguments: {exc}. Raw: {str(original_raw_args)[:100]}", tool_name
 
     unsupported_key = tool_name.strip().lower()
     unsupported_resolved = resolve_tool_name(tool_name)
@@ -264,7 +366,8 @@ def process_tool_call(tools_dict: ToolsDict, tc: Dict[str, Any]) -> Tuple[str, D
         return resolved, tool_args, UNSUPPORTED_TOOLS[unsupported_resolved], tool_name
 
     if resolved not in tools_dict:
-        return resolved, tool_args, f"error: unknown tool '{tool_name}'", tool_name
+        available = sorted(TOOL_DISPLAY_MAP.get(k, k) for k in tools_dict)
+        return resolved, tool_args, f"error: unknown tool '{tool_name}'. Available tools: {', '.join(available)}. Use one of these.", tool_name
 
     # Post-parse repair for string number fields
     if resolved in _TOOL_ARG_NUMBER_FIELDS:
@@ -274,10 +377,25 @@ def process_tool_call(tools_dict: ToolsDict, tc: Dict[str, Any]) -> Tuple[str, D
                 if v is not None:
                     tool_args[field] = v
 
+    # Normalize argument names (alias mapping for small-model friendliness)
+    if isinstance(tool_args, dict):
+        original_keys = set(tool_args.keys())
+        tool_args = _normalize_arg_names(resolved, tool_args)
+        remapped_keys = set(tool_args.keys()) - original_keys
+        if remapped_keys:
+            logging_hook.log_event("format_repair", {
+                "tool": resolved,
+                "reason": "arg_alias_remap",
+                "remapped": sorted(remapped_keys),
+            })
+
     params = tools_dict[resolved][1]
     validation_error = _validate_tool_args(resolved, tool_args, params)
     if validation_error:
         return resolved, tool_args, validation_error, tool_name
+
+    # Increment global tool call counter (for urgency escalation in hints)
+    _state_mod.TOOL_CALL_COUNT += 1
 
     try:
         result = tools_dict[resolved][2](tool_args)

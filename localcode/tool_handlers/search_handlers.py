@@ -21,6 +21,13 @@ from localcode.tool_handlers._state import (
 from localcode.tool_handlers._path import _is_ignored_path, _validate_path
 
 
+def _tool_hints_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_TOOL_HINTS", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
+
+
 def glob_fn(args: Any) -> str:
     args, err = _require_args_dict(args, "glob")
     if err:
@@ -58,6 +65,8 @@ def glob_fn(args: Any) -> str:
             out = "\n".join(files)
             if truncated:
                 out += "\n\n(results are truncated; refine path or pattern)"
+            if _tool_hints_enabled():
+                out += _glob_next_step_hint(files)
             return out
 
     pattern = os.path.join(path, str(pat))
@@ -74,7 +83,17 @@ def glob_fn(args: Any) -> str:
     out = "\n".join(files)
     if truncated:
         out += "\n\n(results are truncated; refine path or pattern)"
+    if _tool_hints_enabled():
+        out += _glob_next_step_hint(files)
     return out
+
+
+def _glob_next_step_hint(files: list) -> str:
+    """Return an optional neutral hint after file discovery."""
+    spec_files = [f for f in files if f.endswith(('.spec.js', '.test.js'))]
+    if spec_files:
+        return f"\n\nHint: tests were found (e.g. {spec_files[0]}). Read relevant files as needed."
+    return ""
 
 
 def grep_fn(args: Any) -> str:
