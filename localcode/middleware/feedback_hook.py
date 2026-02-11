@@ -22,6 +22,12 @@ _display_tool_name_fn: Optional[Callable] = None
 # When matched, the rule generates feedback_text using a template function.
 FEEDBACK_RULES: List[Dict[str, Any]] = [
     {
+        "tool": "*",
+        "match": "unknown tool '",
+        "reason": "unknown_tool_name",
+        "build": "_build_unknown_tool_name",
+    },
+    {
         "tool": "apply_patch",
         "match": "patch context not found",
         "reason": "patch_context_not_found",
@@ -442,8 +448,23 @@ def _build_glob_path_missing(data: Dict[str, Any]) -> str:
     ))
 
 
+def _build_unknown_tool_name(data: Dict[str, Any]) -> str:
+    read_tool = _dn("read")
+    write_tool = _dn("write")
+    edit_tool = _dn("edit")
+    patch_tool = _dn("apply_patch")
+    finish_tool = _dn("finish")
+    return (
+        "FORMAT ERROR: unknown tool name was called.\n"
+        "ACTION: use only available tools shown in the error.\n"
+        f"Common choices: {read_tool}, {write_tool}, {edit_tool}, {patch_tool}, {finish_tool}.\n"
+        "Do not retry the same unknown tool name."
+    )
+
+
 # Builder lookup (string name -> function)
 _BUILDERS: Dict[str, Callable] = {
+    "_build_unknown_tool_name": _build_unknown_tool_name,
     "_build_patch_context_not_found": _build_patch_context_not_found,
     "_build_patch_context_not_unique": _build_patch_context_not_unique,
     "_build_must_read_before_patching": _build_must_read_before_patching,
@@ -472,7 +493,9 @@ _BUILDERS: Dict[str, Callable] = {
 def _rule_matches(rule: Dict[str, Any], tool_name: str, result_text: str) -> bool:
     """Check if a feedback rule matches the given tool name and result text."""
     rule_tool = rule["tool"]
-    if isinstance(rule_tool, tuple):
+    if rule_tool == "*":
+        pass
+    elif isinstance(rule_tool, tuple):
         if tool_name not in rule_tool:
             return False
     elif tool_name != rule_tool:

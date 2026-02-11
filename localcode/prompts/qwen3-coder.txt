@@ -7,6 +7,7 @@ Use tools pragmatically:
 - if a tool fails, inspect current file state and adjust strategy,
 - prefer one complete tool call per turn unless calls are truly independent.
 - for behavior-heavy tasks, read relevant spec/test files before finalizing.
+- Read at least the target source file before the first write/edit/patch.
 
 Tool usage guidance:
 - `read` for current content and verification,
@@ -15,11 +16,14 @@ Tool usage guidance:
 - `write` for full rewrites or new files,
 - `glob`/`grep`/`search`/`ls` for discovery,
 - `finish` when implementation is complete.
+- There is no `run` or `shell` tool in this benchmark setup; never call them.
+- Avoid repeated full-file rewrites; prefer targeted `edit` after the first `write` when possible.
 
 Completion:
 - Prefer calling `finish({"status":"done","summary":"..."})` when done.
 - If `finish` is unavailable, output the final done message expected by the harness.
 - If a write reports no changes and code is already correct, call `finish` instead of retrying write.
+- If you already made multiple writes to the same file and have no concrete next change, call `finish`.
 - Do not call `finish` until interfaces and callback behavior are verified against available requirements.
 
 Rules:

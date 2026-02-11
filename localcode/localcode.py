@@ -661,6 +661,8 @@ def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
         "flow_history_strip_thinking": None,
         "history_tool_truncate_chars": 0,
         "history_tool_truncate_keep_last": 0,
+        "history_tool_call_args_truncate_chars": 0,
+        "history_tool_call_args_keep_last": 0,
         "flow_history_tool_truncate_chars": None,
         "flow_history_tool_truncate_keep_last": None,
         "flow_context_window": 6,
@@ -718,6 +720,10 @@ def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
         settings["history_tool_truncate_chars"] = int(agent_config["history_tool_truncate_chars"] or 0)
     if "history_tool_truncate_keep_last" in agent_config:
         settings["history_tool_truncate_keep_last"] = int(agent_config["history_tool_truncate_keep_last"] or 0)
+    if "history_tool_call_args_truncate_chars" in agent_config:
+        settings["history_tool_call_args_truncate_chars"] = int(agent_config["history_tool_call_args_truncate_chars"] or 0)
+    if "history_tool_call_args_keep_last" in agent_config:
+        settings["history_tool_call_args_keep_last"] = int(agent_config["history_tool_call_args_keep_last"] or 0)
     if "flow_history_tool_truncate_chars" in agent_config:
         raw = agent_config.get("flow_history_tool_truncate_chars")
         settings["flow_history_tool_truncate_chars"] = int(raw) if raw is not None else None
@@ -1094,13 +1100,36 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
         headers={"Content-Type": "application/json"},
     )
 
-    try:
-        resp = urllib.request.urlopen(req, timeout=300)
-        raw = resp.read()
-    except Exception as exc:
-        logging_hook.log_event("request_error", {"error": str(exc)})
-        hooks.emit("api_error", {"error": str(exc), "phase": "request"})
-        return {"error": f"request failed: {exc}"}
+    def _is_transient_request_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        transient_markers = (
+            "remote end closed connection without response",
+            "connection reset by peer",
+            "broken pipe",
+            "timed out",
+            "temporarily unavailable",
+        )
+        return any(marker in text for marker in transient_markers)
+
+    raw = b""
+    request_attempts = 2
+    for attempt in range(1, request_attempts + 1):
+        try:
+            resp = urllib.request.urlopen(req, timeout=300)
+            raw = resp.read()
+            break
+        except Exception as exc:
+            should_retry = attempt < request_attempts and _is_transient_request_error(exc)
+            logging_hook.log_event("request_error", {
+                "error": str(exc),
+                "attempt": attempt,
+                "retrying": should_retry,
+            })
+            hooks.emit("api_error", {"error": str(exc), "phase": "request", "attempt": attempt})
+            if should_retry:
+                time.sleep(0.2 * attempt)
+                continue
+            return {"error": f"request failed: {exc}"}
 
     try:
         payload = json.loads(raw)
@@ -1607,6 +1636,8 @@ def run_agent(
     history_strip_thinking = bool(agent_settings.get("history_strip_thinking", False))
     history_tool_truncate_chars = int(agent_settings.get("history_tool_truncate_chars", 0) or 0)
     history_tool_truncate_keep_last = int(agent_settings.get("history_tool_truncate_keep_last", 0) or 0)
+    history_tool_call_args_truncate_chars = int(agent_settings.get("history_tool_call_args_truncate_chars", 0) or 0)
+    history_tool_call_args_keep_last = int(agent_settings.get("history_tool_call_args_keep_last", 0) or 0)
     flow_retry_hints = bool(agent_settings.get("flow_retry_hints", True))
     flow_context_window = int(agent_settings.get("flow_context_window", 6) or 0)
     phase_control = agent_settings.get("phase_control") or {}
@@ -1669,6 +1700,7 @@ def run_agent(
     code_change_retries = 0
     forced_tool_choice: Optional[str] = None
     write_nudge_sent = False
+    finish_nudge_sent = False
     consecutive_noop_turns = 0
 
     native_thinking = bool(agent_settings.get("native_thinking", False))
@@ -1746,6 +1778,84 @@ def run_agent(
                 logging_hook.log_event("history_strip_thinking", {
                     "removed": len(selected) - len(sanitized),
                 })
+        if history_tool_call_args_truncate_chars > 0:
+            assistant_indices = [
+                i for i, msg in enumerate(sanitized)
+                if isinstance(msg, dict)
+                and msg.get("role") == "assistant"
+                and isinstance(msg.get("tool_calls"), list)
+                and msg.get("tool_calls")
+            ]
+            protected_assistant = set()
+            if history_tool_call_args_keep_last > 0 and assistant_indices:
+                protected_assistant = set(assistant_indices[-history_tool_call_args_keep_last:])
+
+            def _truncate_arg_value(value: Any) -> Any:
+                if isinstance(value, str):
+                    if len(value) <= history_tool_call_args_truncate_chars:
+                        return value
+                    snippet = value[:history_tool_call_args_truncate_chars].rstrip()
+                    return f"{snippet}\n...[truncated {len(value) - len(snippet)} chars]"
+                if isinstance(value, list):
+                    return [_truncate_arg_value(v) for v in value]
+                if isinstance(value, dict):
+                    return {k: _truncate_arg_value(v) for k, v in value.items()}
+                return value
+
+            compacted_messages: List[Dict[str, Any]] = []
+            for idx, msg in enumerate(sanitized):
+                if idx not in assistant_indices or idx in protected_assistant:
+                    compacted_messages.append(msg)
+                    continue
+
+                tool_calls = msg.get("tool_calls")
+                if not isinstance(tool_calls, list):
+                    compacted_messages.append(msg)
+                    continue
+
+                changed = False
+                new_tool_calls: List[Dict[str, Any]] = []
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        new_tool_calls.append(tc)
+                        continue
+                    tc_new = dict(tc)
+                    fn = tc_new.get("function")
+                    if not isinstance(fn, dict):
+                        new_tool_calls.append(tc_new)
+                        continue
+                    fn_new = dict(fn)
+                    arg_raw = fn_new.get("arguments")
+                    if isinstance(arg_raw, str) and len(arg_raw) > history_tool_call_args_truncate_chars:
+                        before_len = len(arg_raw)
+                        try:
+                            parsed = json.loads(arg_raw)
+                        except Exception:
+                            snippet = arg_raw[:history_tool_call_args_truncate_chars].rstrip()
+                            fn_new["arguments"] = json.dumps({
+                                "_truncated": True,
+                                "_chars": before_len,
+                                "_preview": snippet,
+                            }, ensure_ascii=False)
+                        else:
+                            compact = _truncate_arg_value(parsed)
+                            fn_new["arguments"] = json.dumps(compact, ensure_ascii=False)
+                        after_len = len(str(fn_new.get("arguments") or ""))
+                        changed = True
+                        logging_hook.log_event("history_tool_call_truncate", {
+                            "chars_before": before_len,
+                            "chars_after": after_len,
+                        })
+                    tc_new["function"] = fn_new
+                    new_tool_calls.append(tc_new)
+
+                if changed:
+                    new_msg = dict(msg)
+                    new_msg["tool_calls"] = new_tool_calls
+                    compacted_messages.append(new_msg)
+                else:
+                    compacted_messages.append(msg)
+            sanitized = compacted_messages
         if history_tool_truncate_chars <= 0:
             return sanitized
         tool_indices = [i for i, msg in enumerate(sanitized) if isinstance(msg, dict) and msg.get("role") == "tool" and isinstance(msg.get("content"), str)]
@@ -3284,6 +3394,25 @@ def run_agent(
                 )
                 messages.append({"role": "user", "content": nudge_msg})
                 logging_hook.log_event("write_nudge", {
+                    "turn": turns,
+                    "effective_turn": effective_turns,
+                    "remaining": remaining,
+                })
+
+        # Finish nudge: avoid looping near turn limit when code has already changed.
+        if code_change_made and not finish_nudge_sent:
+            effective_turns = turns - format_retry_turns
+            remaining = agent_max_turns - effective_turns
+            if remaining <= 2:
+                finish_nudge_sent = True
+                finish_tool = TOOL_DISPLAY_MAP.get("finish", "finish")
+                finish_msg = (
+                    f"IMPORTANT: {remaining} turns left. "
+                    f"If your implementation is complete, call {finish_tool} now. "
+                    "If not complete, make one final targeted change."
+                )
+                messages.append({"role": "user", "content": finish_msg})
+                logging_hook.log_event("finish_nudge", {
                     "turn": turns,
                     "effective_turn": effective_turns,
                     "remaining": remaining,

@@ -216,6 +216,16 @@ class TestFeedbackHook:
         result = hooks.emit("tool_after", data)
         assert result["feedback_reason"] == "ls_path_missing"
 
+    def test_unknown_tool_name_feedback(self):
+        data = {
+            "tool_name": "run",
+            "result": "error: unknown tool 'run'. Available tools: read, write",
+            "is_error": True,
+        }
+        result = hooks.emit("tool_after", data)
+        assert result["feedback_reason"] == "unknown_tool_name"
+        assert "unknown tool name" in result["feedback_text"].lower()
+
     def test_rule_matches_function(self):
         """Test _rule_matches with tuple tool names."""
         from localcode.middleware.feedback_hook import _rule_matches
@@ -234,6 +244,11 @@ class TestFeedbackHook:
         from localcode.middleware.feedback_hook import _rule_matches
         rule = {"tool": "read", "match": "file not found", "reason": "x", "build": "y"}
         assert _rule_matches(rule, "read", "ERROR: File Not Found")
+
+    def test_rule_matches_wildcard_tool(self):
+        from localcode.middleware.feedback_hook import _rule_matches
+        rule = {"tool": "*", "match": "unknown tool", "reason": "x", "build": "y"}
+        assert _rule_matches(rule, "run", "error: unknown tool 'run'")
 
 
 class TestMetricsHook:

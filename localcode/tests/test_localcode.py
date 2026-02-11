@@ -851,6 +851,77 @@ class TestToolChoiceRequired(unittest.TestCase):
         self.assertEqual(forced.get("function", {}).get("name"), "read")
 
 
+class TestHistoryToolCallTruncation(unittest.TestCase):
+    """Test compaction of historical assistant tool-call arguments."""
+
+    def _run_with_history_settings(self, truncate_chars: int, keep_last: int):
+        huge_content = "x" * 5000
+        first_response = {
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_write_1",
+                        "type": "function",
+                        "function": {
+                            "name": "write",
+                            "arguments": json.dumps({"path": "react.js", "content": huge_content}),
+                        },
+                    }],
+                }
+            }],
+            "usage": {},
+        }
+        second_response = {
+            "choices": [{"message": {"content": "done", "tool_calls": []}}],
+            "usage": {},
+        }
+        captured_requests = []
+
+        def fake_call_api(messages, system_prompt, tools_dict, request_overrides=None):
+            captured_requests.append(messages)
+            if len(captured_requests) == 1:
+                return first_response
+            return second_response
+
+        def fake_process_tool_call(tools_dict, tool_call):
+            return "write", {"path": "react.js", "content": huge_content}, "ok: updated react.js, +1 -0 lines", "write"
+
+        tools_dict = {"write": ("write", {"path": "string", "content": "string"}, lambda *_args, **_kwargs: "ok")}
+        agent_settings = {
+            "request_overrides": {},
+            "min_tool_calls": 0,
+            "max_format_retries": 0,
+            "history_tool_call_args_truncate_chars": truncate_chars,
+            "history_tool_call_args_keep_last": keep_last,
+        }
+
+        with patch("localcode.localcode.call_api", side_effect=fake_call_api), \
+             patch("localcode.localcode.process_tool_call", side_effect=fake_process_tool_call):
+            agent.run_agent("prompt", "system", tools_dict, agent_settings)
+
+        self.assertGreaterEqual(len(captured_requests), 2)
+        second_request = captured_requests[1]
+        assistant_with_tool = next(
+            msg for msg in second_request
+            if msg.get("role") == "assistant" and msg.get("tool_calls")
+        )
+        return assistant_with_tool["tool_calls"][0]["function"]["arguments"]
+
+    def test_truncates_old_assistant_tool_call_arguments(self):
+        args_json = self._run_with_history_settings(truncate_chars=120, keep_last=0)
+        parsed = json.loads(args_json)
+        self.assertEqual(parsed.get("path"), "react.js")
+        self.assertIn("[truncated", parsed.get("content", ""))
+        self.assertLess(len(args_json), 600)
+
+    def test_keeps_recent_assistant_tool_call_arguments(self):
+        args_json = self._run_with_history_settings(truncate_chars=120, keep_last=1)
+        parsed = json.loads(args_json)
+        self.assertEqual(parsed.get("path"), "react.js")
+        self.assertEqual(len(parsed.get("content", "")), 5000)
+
+
 class TestForcedToolCall(unittest.TestCase):
     """Test forced tool call selection."""
 
@@ -3403,3 +3474,46 @@ class TestMakeModelCallHandlerSelfBatch(unittest.TestCase):
         handler = self._make_handler()
         result = handler({"questions": ["q1"]})
         self.assertEqual(result, "ok")
+
+
+class TestCallApiRetries(unittest.TestCase):
+    """Tests for transient request retry logic in call_api()."""
+
+    @patch("localcode.localcode.urllib.request.urlopen")
+    def test_retries_transient_request_error_once(self, mock_urlopen):
+        payload = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_urlopen.side_effect = [
+            Exception("Remote end closed connection without response"),
+            mock_response,
+        ]
+
+        with patch("localcode.localcode.MODEL", "test-model"), \
+             patch("localcode.localcode.API_URL", "http://example.com/v1/chat/completions"), \
+             patch("localcode.localcode.MAX_TOKENS", 256):
+            result = agent.call_api(
+                messages=[{"role": "user", "content": "ping"}],
+                system_prompt="system",
+                tools_dict={},
+            )
+
+        self.assertIn("choices", result)
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch("localcode.localcode.urllib.request.urlopen")
+    def test_does_not_retry_non_transient_request_error(self, mock_urlopen):
+        mock_urlopen.side_effect = Exception("Name or service not known")
+
+        with patch("localcode.localcode.MODEL", "test-model"), \
+             patch("localcode.localcode.API_URL", "http://example.com/v1/chat/completions"), \
+             patch("localcode.localcode.MAX_TOKENS", 256):
+            result = agent.call_api(
+                messages=[{"role": "user", "content": "ping"}],
+                system_prompt="system",
+                tools_dict={},
+            )
+
+        self.assertIn("error", result)
+        self.assertIn("request failed", result.get("error", ""))
+        self.assertEqual(mock_urlopen.call_count, 1)

@@ -1,0 +1,52 @@
+{
+  "name": "mlx/qwen3-coder-next-8bit",
+  "description": "Qwen3 Coder Next (80B/A3B) 8-bit MoE via mlx-lm — coding-optimized, non-thinking.",
+  "prompt": "prompts/qwen3-coder.txt",
+  "model": "/Users/pimpc181/.lmstudio/models/mlx-community/Qwen3-Coder-Next-8bit",
+  "url": "http://localhost:1236/v1/chat/completions",
+  "temperature": 0.3,
+  "top_p": 0.95,
+  "top_k": 40,
+  "max_tokens": 16000,
+  "tool_choice": "required",
+  "cache": false,
+  "think": false,
+  "tool_name_style": "canonical",
+  "auto_tool_call_on_failure": true,
+  "require_code_change": true,
+  "thinking_visibility": "show",
+  "min_tool_calls": 1,
+  "max_turns": 24,
+  "max_format_retries": 2,
+  "max_batch_tool_calls": 1,
+  "history_mode": "window",
+  "history_max_messages": 16,
+  "history_keep_first": true,
+  "history_tool_truncate_chars": 800,
+  "history_tool_truncate_keep_last": 2,
+  "history_tool_call_args_truncate_chars": 1200,
+  "history_tool_call_args_keep_last": 2,
+  "tools": [
+    "ls",
+    "read",
+    "write",
+    "edit",
+    "glob",
+    "grep",
+    "search",
+    "apply_patch",
+    "finish"
+  ],
+  "native_thinking": false,
+  "server_config": {
+    "model_path": "~/.lmstudio/models/mlx-community/Qwen3-Coder-Next-8bit",
+    "context_window": 32768,
+    "server_type": "mlx",
+    "extra_args": [
+      "--chat-template-args",
+      "{\"enable_thinking\":false}",
+      "--log-level",
+      "INFO"
+    ]
+  }
+}
