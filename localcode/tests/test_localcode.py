@@ -3517,3 +3517,41 @@ class TestCallApiRetries(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("request failed", result.get("error", ""))
         self.assertEqual(mock_urlopen.call_count, 1)
+
+    @patch("localcode.localcode.time.perf_counter", side_effect=[10.0, 12.0])
+    @patch("localcode.localcode.urllib.request.urlopen")
+    def test_estimates_tps_when_server_timings_missing(self, mock_urlopen, _mock_perf_counter):
+        payload = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14,
+            },
+        }
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.headers = {}
+        mock_urlopen.return_value = mock_response
+
+        with patch("localcode.localcode.MODEL", "test-model"), \
+             patch("localcode.localcode.API_URL", "http://example.com/v1/chat/completions"), \
+             patch("localcode.localcode.MAX_TOKENS", 256):
+            result = agent.call_api(
+                messages=[{"role": "user", "content": "ping"}],
+                system_prompt="system",
+                tools_dict={},
+            )
+
+        self.assertIn("timings", result)
+        self.assertTrue(result["timings"].get("estimated"))
+        self.assertAlmostEqual(result["timings"].get("prompt_per_second"), 5.0, places=2)
+        self.assertAlmostEqual(result["timings"].get("predicted_per_second"), 2.0, places=2)
+
+    def test_format_usage_marks_estimated_tps(self):
+        info = agent.format_usage_info(
+            {"prompt_tokens": 10, "completion_tokens": 4},
+            {"prompt_per_second": 5.0, "predicted_per_second": 2.0, "estimated": True},
+        )
+        self.assertIn("prefill ~5 t/s", info)
+        self.assertIn("decode ~2.0 t/s", info)

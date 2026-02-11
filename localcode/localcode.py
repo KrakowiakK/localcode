@@ -939,14 +939,16 @@ def format_usage_info(usage: Optional[Dict[str, Any]], timings: Optional[Dict[st
     ttft = timing.get("ttft", 0)
     prefill_tps = (timings or {}).get("prompt_per_second", 0) or timing.get("prefill_tps", 0)
     decode_tps = (timings or {}).get("predicted_per_second", 0) or timing.get("decode_tps", 0)
+    tps_estimated = bool((timings or {}).get("estimated", False) or timing.get("estimated", False))
+    tps_mark = "~" if tps_estimated else ""
 
     parts = [f"{prompt_tokens}→{completion_tokens} tok"]
     if ttft:
         parts.append(f"TTFT {float(ttft):.2f}s")
     if prefill_tps:
-        parts.append(f"prefill {float(prefill_tps):.0f} t/s")
+        parts.append(f"prefill {tps_mark}{float(prefill_tps):.0f} t/s")
     if decode_tps:
-        parts.append(f"decode {float(decode_tps):.1f} t/s")
+        parts.append(f"decode {tps_mark}{float(decode_tps):.1f} t/s")
     return " | ".join(parts)
 
 
@@ -1099,6 +1101,7 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
         data=json.dumps(request_data).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
+    request_started_at = time.perf_counter()
 
     def _is_transient_request_error(exc: Exception) -> bool:
         text = str(exc).lower()
@@ -1148,16 +1151,34 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
     if request_id:
         payload["request_id"] = request_id
 
+    request_elapsed_s = max(time.perf_counter() - request_started_at, 1e-6)
+
     # Log usage, timings (TPS from llama-server), and request_id
     meta: Dict[str, Any] = {
         "usage": payload.get("usage", {}),
         "request_id": payload.get("request_id"),
     }
     timings = payload.get("timings")
+    usage = payload.get("usage") or {}
+    if not isinstance(timings, dict):
+        timings = None
+    if not timings and isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if isinstance(prompt_tokens, (int, float)) and isinstance(completion_tokens, (int, float)):
+            timings = {
+                "prompt_per_second": (float(prompt_tokens) / request_elapsed_s) if prompt_tokens > 0 else 0.0,
+                "predicted_per_second": (float(completion_tokens) / request_elapsed_s) if completion_tokens > 0 else 0.0,
+                "elapsed_seconds": request_elapsed_s,
+                "estimated": True,
+            }
+            payload["timings"] = timings
     if timings:
         meta["timings"] = timings
         meta["prefill_tps"] = round(timings.get("prompt_per_second", 0), 2)
         meta["decode_tps"] = round(timings.get("predicted_per_second", 0), 2)
+        if timings.get("estimated"):
+            meta["timings_estimated"] = True
     logging_hook.log_event("response_meta", meta)
 
     # Hook: api_response (read-only notification)

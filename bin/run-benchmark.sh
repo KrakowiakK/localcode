@@ -338,6 +338,7 @@ def new_usage_bucket():
 
 per_task_usage = defaultdict(new_usage_bucket)
 per_task_usage_try = defaultdict(lambda: {"try1": new_usage_bucket(), "try2": new_usage_bucket()})
+estimated_tps_used = False
 per_task_try = defaultdict(lambda: {
     "try1": {"calls": 0, "errs": 0},
     "try2": {"calls": 0, "errs": 0},
@@ -533,6 +534,9 @@ if log_dir.is_dir():
                             })
                 if evt.get("event") == "response_meta":
                     usage = evt.get("usage") or {}
+                    nonlocal_estimated = False
+                    if evt.get("timings_estimated") is True:
+                        nonlocal_estimated = True
                     prompt_tokens = usage.get("prompt_tokens")
                     completion_tokens = usage.get("completion_tokens")
                     total_tokens = usage.get("total_tokens")
@@ -542,8 +546,14 @@ if log_dir.is_dir():
                     decode_tps = evt.get("decode_tps")
                     if prefill_tps is None or decode_tps is None:
                         timing = usage.get("timing") or {}
+                        if timing.get("estimated") is True:
+                            nonlocal_estimated = True
                         prefill_tps = prefill_tps or timing.get("prefill_tps")
                         decode_tps = decode_tps or timing.get("decode_tps")
+                    if isinstance(evt.get("timings"), dict) and evt["timings"].get("estimated") is True:
+                        nonlocal_estimated = True
+                    if nonlocal_estimated:
+                        estimated_tps_used = True
                     if flow_active and current_try in ("try1", "try2"):
                         bucket = per_task_usage[task_key]
                         bucket_try = per_task_usage_try[task_key][current_try]
@@ -672,6 +682,8 @@ if per_task_usage:
         ("decode_tps", format_tps(overall["decode_sum"], overall["decode_weight"])),
     ]
     print_table("Token & speed summary (from response_meta)", rows, ["metric", "value"])
+    if estimated_tps_used:
+        print("Note: TPS values are estimated from request duration for servers that do not return native timings.")
 
 tool_rows = [(name, count) for name, count in per_tool_calls.most_common()]
 print_table("Tool calls (total)", tool_rows, ["tool", "count"])
