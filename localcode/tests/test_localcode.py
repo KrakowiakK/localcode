@@ -238,6 +238,25 @@ class TestFinishTool(unittest.TestCase):
         self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
 
 
+class TestThinkTool(unittest.TestCase):
+    """Test think tool behavior."""
+
+    def test_think_records_note(self):
+        result = agent.think_tool({"thought": "Read source and spec, then patch compute graph updates."})
+        self.assertTrue(result.startswith("ok:"), f"Expected ok, got: {result}")
+        self.assertIn("thought recorded", result.lower())
+
+    def test_think_requires_non_empty_thought(self):
+        result = agent.think_tool({"thought": "   "})
+        self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
+        self.assertIn("non-empty", result.lower())
+
+    def test_think_requires_thought_param(self):
+        result = agent.think_tool({})
+        self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
+        self.assertIn("thought", result.lower())
+
+
 class TestShellTool(unittest.TestCase):
     """Test shell tool."""
 
@@ -1376,6 +1395,74 @@ class TestAnalysisOnlyRetry(unittest.TestCase):
 
         # Should return error, never treat analysis artifact as final content
         self.assertIn("analysis-only", content)
+
+
+class TestProgressInjection(unittest.TestCase):
+    """Test optional per-turn progress injection."""
+
+    def test_progress_message_injected_after_tool_result(self):
+        responses = [
+            {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read",
+                                "arguments": json.dumps({"path": "react.js"}),
+                            },
+                        }],
+                    }
+                }],
+                "usage": {},
+            },
+            {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {
+                                "name": "finish",
+                                "arguments": "{}",
+                            },
+                        }],
+                    }
+                }],
+                "usage": {},
+            },
+        ]
+
+        def fake_call_api(messages, system_prompt, tools_dict, request_overrides=None):
+            return responses.pop(0)
+
+        tools_dict = {
+            "read": ("read", {"path": "string"}, lambda _args: "ok: read"),
+            "finish": ("finish", {}, agent.finish_run),
+        }
+        agent_settings = {
+            "request_overrides": {},
+            "min_tool_calls": 0,
+            "max_format_retries": 0,
+            "progress_injection": True,
+            "progress_max_tokens": 48,
+        }
+
+        with patch("localcode.localcode.call_api", side_effect=fake_call_api):
+            content, messages = agent.run_agent("prompt", "system", tools_dict, agent_settings)
+
+        self.assertEqual(content, "done")
+        injected = [
+            msg for msg in messages
+            if msg.get("role") == "user"
+            and "STATE (informational):" in (msg.get("content") or "")
+        ]
+        self.assertTrue(injected, "Expected at least one injected progress message")
+        self.assertIn("read=[", injected[0]["content"])
+        self.assertIn("next=[", injected[0]["content"])
 
 
 class TestNoopDetection(unittest.TestCase):

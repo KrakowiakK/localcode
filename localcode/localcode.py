@@ -669,6 +669,8 @@ def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
         "flow_retry_hints": True,
         "phase_control": None,
         "phase_log": "off",
+        "progress_injection": False,
+        "progress_max_tokens": 48,
     }
 
     for k in ("min_tool_calls", "max_format_retries", "max_turns"):
@@ -783,6 +785,22 @@ def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
     if phase_log_mode not in {"off", "stdout", "log", "both"}:
         phase_log_mode = "off"
     settings["phase_log"] = phase_log_mode
+
+    if "progress_injection" in agent_config:
+        settings["progress_injection"] = bool(agent_config["progress_injection"])
+    env_progress = os.environ.get("LOCALCODE_PROGRESS_INJECTION", "")
+    if env_progress:
+        settings["progress_injection"] = str(env_progress).strip().lower() in {"1", "true", "yes", "on"}
+
+    if "progress_max_tokens" in agent_config:
+        settings["progress_max_tokens"] = int(agent_config["progress_max_tokens"] or 0)
+    env_progress_max = os.environ.get("LOCALCODE_PROGRESS_MAX_TOKENS", "")
+    if env_progress_max:
+        try:
+            settings["progress_max_tokens"] = int(env_progress_max)
+        except ValueError:
+            pass
+    settings["progress_max_tokens"] = max(16, int(settings.get("progress_max_tokens", 48) or 48))
 
     if "native_thinking" in agent_config:
         settings["native_thinking"] = bool(agent_config["native_thinking"])
@@ -1287,6 +1305,19 @@ def _is_noop_write_result(result: str) -> bool:
     return False
 
 
+def _truncate_words(text: str, max_words: int) -> str:
+    """Truncate text to a max number of whitespace-delimited words."""
+    if not isinstance(text, str):
+        return ""
+    limit = int(max_words or 0)
+    if limit <= 0:
+        return text
+    words = text.split()
+    if len(words) <= limit:
+        return text
+    return " ".join(words[:limit]).rstrip() + " ..."
+
+
 def get_available_write_tools(tools_dict: ToolsDict) -> List[str]:
     """Get list of available write tools from tools_dict using categories."""
     return [name for name in tools_dict if is_write_tool(name)]
@@ -1430,6 +1461,24 @@ def finish_run(args: Dict[str, Any]) -> str:
         "summary_preview": summary[:200],
     })
     return f"ok: finish recorded ({status})"
+
+
+def think_tool(args: Dict[str, Any]) -> str:
+    """Record explicit reasoning with no side effects."""
+    data, err = _require_args_dict(args, "think")
+    if err:
+        return err
+
+    thought = data.get("thought")
+    if not isinstance(thought, str) or not thought.strip():
+        return "error: think requires non-empty string parameter 'thought'"
+
+    clean = thought.strip()
+    logging_hook.log_event("think_used", {
+        "chars": len(clean),
+        "preview": clean[:200],
+    })
+    return "ok: thought recorded"
 
 
 def _collect_parent_summary(messages: List[Dict[str, Any]], max_messages: int = 6, max_chars: int = 1200) -> str:
@@ -1730,6 +1779,15 @@ def run_agent(
     finish_nudge_sent = False
     consecutive_noop_turns = 0
 
+    progress_enabled = bool(agent_settings.get("progress_injection", False))
+    progress_max_tokens = int(agent_settings.get("progress_max_tokens", 48) or 48)
+    progress_reads: List[str] = []
+    progress_writes: Dict[str, int] = {}
+    progress_last_error = ""
+    progress_source_read = False
+    progress_spec_read = False
+    progress_last_path = ""
+
     native_thinking = bool(agent_settings.get("native_thinking", False))
 
     agent_max_turns = int(agent_settings.get("max_turns", MAX_TURNS) or MAX_TURNS)
@@ -1738,6 +1796,78 @@ def run_agent(
 
     READ_ONLY_TOOLS = {"list_dir", "read_file", "read_files", "search_text", "find_files"}
     WRITE_TOOLS = {"write_file", "replace_in_file", "patch_files"}
+
+    def _progress_path_label(path: str) -> str:
+        if not path:
+            return ""
+        path = str(path).strip()
+        if not path:
+            return ""
+        base = os.path.basename(path)
+        return base or path
+
+    def _progress_remember_read(path: Optional[str]) -> None:
+        nonlocal progress_source_read, progress_spec_read
+        label = _progress_path_label(path or "")
+        if not label:
+            return
+        if label not in progress_reads:
+            progress_reads.append(label)
+            if len(progress_reads) > 8:
+                del progress_reads[0]
+        lower = label.lower()
+        if lower.endswith((".spec.js", ".test.js", "_test.js", ".spec.ts", ".test.ts")):
+            progress_spec_read = True
+        elif "." in lower:
+            progress_source_read = True
+
+    def _progress_remember_write(path: Optional[str]) -> None:
+        label = _progress_path_label(path or "")
+        if not label:
+            return
+        progress_writes[label] = progress_writes.get(label, 0) + 1
+
+    def _progress_next_action() -> str:
+        err = progress_last_error.lower()
+        if err:
+            if "unknown tool '" in err:
+                return "retry using one listed tool name exactly"
+            if "repeated no-op write" in err or "repeated no-op edit" in err:
+                target = _progress_path_label(progress_last_path) or "same file"
+                return f"read {target} with diff=true, then change strategy"
+            if "missing required parameter" in err:
+                return "retry same tool with required parameters"
+            if "old text was not found" in err or "old_string not found" in err:
+                return "read file and copy exact old snippet before edit"
+            return "adjust tool arguments based on the error and retry once"
+        if not progress_source_read:
+            return "read source file"
+        if not progress_spec_read:
+            return "read spec/test file"
+        total_writes = sum(progress_writes.values())
+        if total_writes == 0:
+            return "implement using write/edit/apply_patch"
+        return "if complete call finish, otherwise make one targeted edit"
+
+    def _build_progress_message() -> Tuple[str, Dict[str, Any]]:
+        reads_text = ", ".join(progress_reads[-4:]) if progress_reads else "-"
+        writes_items = [f"{name} x{count}" for name, count in sorted(progress_writes.items())]
+        writes_text = ", ".join(writes_items[:4]) if writes_items else "-"
+        last_error_text = progress_last_error if progress_last_error else "-"
+        next_action = _progress_next_action()
+        raw = (
+            "STATE (informational): "
+            f"read=[{reads_text}] ; wrote=[{writes_text}] ; "
+            f"last_error=[{last_error_text}] ; next=[{next_action}]."
+        )
+        text = _truncate_words(raw, progress_max_tokens)
+        payload = {
+            "read_files_count": len(progress_reads),
+            "write_counts": dict(progress_writes),
+            "last_error": last_error_text,
+            "next_action": next_action,
+        }
+        return text, payload
 
     def _filter_tools_for_stage(stage: str) -> ToolsDict:
         stage = (stage or "").strip().lower()
@@ -3237,6 +3367,22 @@ def run_agent(
                     if _did_tool_make_change(resolved_name, result):
                         code_change_made = True
 
+            if progress_enabled:
+                if resolved_name in {"read", "read_file"} and isinstance(path_value, str):
+                    _progress_remember_read(path_value)
+                elif resolved_name in {"batch_read", "read_files"} and isinstance(tool_args, dict):
+                    for p in (tool_args.get("paths") or []):
+                        if isinstance(p, str):
+                            _progress_remember_read(p)
+                if is_write_tool(resolved_name) and isinstance(path_value, str):
+                    _progress_remember_write(path_value)
+                if error_detected and isinstance(result, str):
+                    progress_last_error = result.splitlines()[0][:200]
+                elif not error_detected:
+                    progress_last_error = ""
+                if isinstance(path_value, str):
+                    progress_last_path = path_value
+
             logging_hook.log_event("tool_result", {
                 "turn": turns,
                 "tool": tc_display_name or response_name or resolved_name,
@@ -3268,6 +3414,15 @@ def run_agent(
 
         messages.append(assistant_message)
         messages.extend(tool_results)
+
+        if progress_enabled and tool_results and not finish_requested:
+            progress_text, progress_payload = _build_progress_message()
+            messages.append({"role": "user", "content": progress_text})
+            logging_hook.log_event("progress_injected", {
+                "turn": turns,
+                "message": progress_text[:200],
+                **progress_payload,
+            })
 
         if finish_requested and not feedback_text:
             if require_code_change and not code_change_made:
@@ -3673,6 +3828,7 @@ if __name__ == "__main__":
         "search": search_fn,
         "shell": shell,
         "ls": ls_fn,
+        "think": think_tool,
         "plan_tasks": plan_tasks,
         "flow_stage_done": flow_stage_done,
         "finish": finish_run,

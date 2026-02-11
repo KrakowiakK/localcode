@@ -146,9 +146,11 @@ class TestFeedbackHook:
             "tool_name": "write",
             "result": "error: repeated no-op write for react.js. Write different content, or call finish if implementation is already correct.",
             "is_error": True,
+            "path_value": "react.js",
         }
         result = hooks.emit("tool_after", data)
         assert result["feedback_reason"] == "write_repeated_noop"
+        assert "diff=true" in result["feedback_text"]
 
     def test_write_missing_content(self):
         data = {
@@ -225,6 +227,7 @@ class TestFeedbackHook:
         result = hooks.emit("tool_after", data)
         assert result["feedback_reason"] == "unknown_tool_name"
         assert "unknown tool name" in result["feedback_text"].lower()
+        assert "no run/exec tool" in result["feedback_text"].lower()
 
     def test_rule_matches_function(self):
         """Test _rule_matches with tuple tool names."""

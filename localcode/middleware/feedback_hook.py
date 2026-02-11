@@ -6,6 +6,7 @@ feedback messages as a rule table. Registers on 'tool_after' event and sets
 feedback_text/feedback_reason in the event data when a matching rule fires.
 """
 
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from localcode import hooks
@@ -358,17 +359,24 @@ def _build_write_noop(data: Dict[str, Any]) -> str:
     edit_tool = _dn("edit")
     return _bft(data.get("tool_name", "write"), "write_noop", (
         f"FORMAT ERROR: {write_tool} wrote identical content (no-op).\n"
-        f"ACTION: {read_tool}(path) then {write_tool} with DIFFERENT content, "
-        f"or use {edit_tool} to change a specific part. If already correct, call finish."
+        f"ACTION: {read_tool}(path) (optionally diff=true), then {write_tool} with DIFFERENT content, "
+        f"or use {edit_tool} for a targeted change. If already correct, call finish."
     ))
 
 
 def _build_write_repeated_noop(data: Dict[str, Any]) -> str:
     write_tool = _dn("write")
+    read_tool = _dn("read")
+    edit_tool = _dn("edit")
+    path_value = data.get("path_value")
+    target = path_value if isinstance(path_value, str) and path_value else "the same file path"
     return _bft(data.get("tool_name", "write"), "write_repeated_noop", (
         f"LOOP GUARD: repeated no-op {write_tool} calls detected.\n"
-        "ACTION: do not repeat the same write again.\n"
-        "Use different content for a real fix, or call finish if implementation is already correct."
+        "ACTION:\n"
+        f"1. Call {read_tool} on {target} (use diff=true if available).\n"
+        f"2. Change strategy: use {edit_tool} or substantially different {write_tool} content.\n"
+        "3. If implementation is already correct, call finish.\n"
+        "Do NOT repeat the same write again."
     ))
 
 
@@ -450,15 +458,29 @@ def _build_glob_path_missing(data: Dict[str, Any]) -> str:
 
 def _build_unknown_tool_name(data: Dict[str, Any]) -> str:
     read_tool = _dn("read")
+    grep_tool = _dn("grep")
+    search_tool = _dn("search")
     write_tool = _dn("write")
     edit_tool = _dn("edit")
     patch_tool = _dn("apply_patch")
     finish_tool = _dn("finish")
+    result_text = str(data.get("result") or "")
+    attempted = ""
+    m = re.search(r"unknown tool '([^']+)'", result_text, re.IGNORECASE)
+    if m:
+        attempted = m.group(1).strip().lower()
+    extra = ""
+    if attempted in {"run", "exec", "execute", "bash", "cmd"}:
+        extra = (
+            f"\nIf you wanted to inspect code, use {read_tool}/{grep_tool}/{search_tool}. "
+            "There is no run/exec tool."
+        )
     return (
         "FORMAT ERROR: unknown tool name was called.\n"
         "ACTION: use only available tools shown in the error.\n"
         f"Common choices: {read_tool}, {write_tool}, {edit_tool}, {patch_tool}, {finish_tool}.\n"
         "Do not retry the same unknown tool name."
+        f"{extra}"
     )
 
 

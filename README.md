@@ -273,6 +273,8 @@ Agent configs in `localcode/agents/*.json` define model, tools, and inference pa
 | `min_tool_calls` | Minimum tool calls required |
 | `max_format_retries` | Retries on malformed responses |
 | `max_batch_tool_calls` | Max tool calls per response (1-10) |
+| `progress_injection` | Inject short per-turn state summary after tool calls |
+| `progress_max_tokens` | Max size of injected progress summary |
 | `phase_log` | `off` / `stdout` / `log` / `both` |
 | `server_config.model_path` | Local path to the GGUF file |
 | `server_config.hf_model` | HuggingFace fallback for download |
@@ -337,7 +339,7 @@ For stricter multi‑stage workflows, use `task_flow_mode` or a custom `flow` wi
 | `grep` | - | Search file contents (regex) |
 | `search` | `search_text` | Search file contents (simple) |
 | `shell` | - | Execute shell command (sandboxed) |
-| `think` | `reasoning` | Internal reasoning step |
+| `think` | `reasoning`, `step_by_step` | Optional no-side-effect planning note (`thought`) |
 | `ask_agent` | - | Delegate to sub-agent |
 | `ask_questions` | - | Batch reasoning questions |
 | `plan_solution` | `get_plan` | Plan before implementing |
@@ -356,6 +358,9 @@ Each run creates log files in `localcode/logs/`:
 - `.jsonl` — structured events (requests, responses, tool calls, phase events)
 - `.log` — human-readable conversation dump (includes **PHASE EVENTS** when `phase_log=log|both`)
 - `.raw.json` — raw conversation in JSON
+
+When `progress_injection` is enabled, `.jsonl` includes `progress_injected` events
+with short state summaries (`read_files_count`, `write_counts`, `last_error`, `next_action`).
 
 ---
 

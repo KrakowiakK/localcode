@@ -2,34 +2,13 @@
   "name": "think",
   "aliases": ["reasoning", "step_by_step"],
   "category": "reasoning",
-  "description": "Think step by step about a problem. Use before implementing (stage=plan), after coding (stage=review), when debugging (stage=debug), or to summarize (stage=summary). Can be called multiple times.",
-  "additionalProperties": true,
+  "description": "Reason about the problem before acting. This tool has no side effects and does not modify files.\n\nUse it for:\n- summarizing what you learned from reads\n- deciding the next tool call\n- avoiding repeated errors/loops\n\nExamples:\n- {{tool:think}}({\"thought\": \"I read source+spec; next I should patch ComputeCell callback ordering.\"})\n- {{tool:think}}({\"thought\": \"Write was no-op. I should read with diff=true and switch to edit.\"})\n\nReturns: ok: thought recorded",
+  "additionalProperties": false,
   "parameters": {
-    "prompt": {
+    "thought": {
       "type": "string",
-      "description": "What you want to think about"
-    },
-    "stage": {
-      "type": "string",
-      "description": "Optional thinking stage: plan, review, debug, or summary. Each stage focuses on different questions.",
-      "enum": ["plan", "review", "debug", "summary"]
+      "description": "Your short analysis of current state and next action"
     }
   },
-  "required": ["prompt"],
-  "handler": "think",
-  "model_call": {
-    "mode": "self",
-    "include_history": true,
-    "temperature": 0.3,
-    "max_tokens": 2000,
-    "timeout": 120,
-    "system_prompt_file": "prompts/think_default.txt",
-    "stage_param": "stage",
-    "stage_prompt_files": {
-      "plan": "prompts/think_plan.txt",
-      "review": "prompts/think_review.txt",
-      "debug": "prompts/think_debug.txt",
-      "summary": "prompts/think_summary.txt"
-    }
-  }
+  "handler": "think"
 }
