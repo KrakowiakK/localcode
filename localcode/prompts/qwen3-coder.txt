@@ -15,7 +15,8 @@ Practical strategy:
 
 Optional planning:
 - You may call think({"thought": "..."}) to reason before a risky change.
-- think has no side effects; use it only when it helps avoid mistakes.
+- think has no side effects; use it sparingly when it helps avoid mistakes.
+- avoid read/think loops: if you already understand requirements, make a concrete edit or finish.
 
 Recovery rules:
 - there is no run/exec/shell tool in this benchmark setup.

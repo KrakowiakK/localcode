@@ -1787,6 +1787,7 @@ def run_agent(
     progress_source_read = False
     progress_spec_read = False
     progress_last_path = ""
+    progress_non_write_streak = 0
 
     native_thinking = bool(agent_settings.get("native_thinking", False))
 
@@ -1828,6 +1829,12 @@ def run_agent(
         progress_writes[label] = progress_writes.get(label, 0) + 1
 
     def _progress_next_action() -> str:
+        total_writes = sum(progress_writes.values())
+        if progress_non_write_streak >= 3:
+            if total_writes > 0:
+                return "stop read/think loop: make one targeted edit or call finish"
+            return "stop read/think loop: implement now with write/edit/apply_patch"
+
         err = progress_last_error.lower()
         if err:
             if "unknown tool '" in err:
@@ -1844,7 +1851,6 @@ def run_agent(
             return "read source file"
         if not progress_spec_read:
             return "read spec/test file"
-        total_writes = sum(progress_writes.values())
         if total_writes == 0:
             return "implement using write/edit/apply_patch"
         return "if complete call finish, otherwise make one targeted edit"
@@ -3376,6 +3382,10 @@ def run_agent(
                             _progress_remember_read(p)
                 if is_write_tool(resolved_name) and isinstance(path_value, str):
                     _progress_remember_write(path_value)
+                if is_write_tool(resolved_name):
+                    progress_non_write_streak = 0
+                elif resolved_name != "finish":
+                    progress_non_write_streak += 1
                 if error_detected and isinstance(result, str):
                     progress_last_error = result.splitlines()[0][:200]
                 elif not error_detected:
