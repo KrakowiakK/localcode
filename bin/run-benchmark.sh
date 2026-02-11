@@ -330,10 +330,9 @@ def new_usage_bucket():
         "prompt": 0,
         "completion": 0,
         "total": 0,
-        "prefill_sum": 0.0,
-        "prefill_weight": 0.0,
-        "decode_sum": 0.0,
-        "decode_weight": 0.0,
+        "prefill_time": 0.0,
+        "decode_time": 0.0,
+        "elapsed_time": 0.0,
     }
 
 per_task_usage = defaultdict(new_usage_bucket)
@@ -534,6 +533,7 @@ if log_dir.is_dir():
                             })
                 if evt.get("event") == "response_meta":
                     usage = evt.get("usage") or {}
+                    timings_obj = evt.get("timings") if isinstance(evt.get("timings"), dict) else {}
                     nonlocal_estimated = False
                     if evt.get("timings_estimated") is True:
                         nonlocal_estimated = True
@@ -544,13 +544,16 @@ if log_dir.is_dir():
                     # Fallback to legacy usage.timing for backward compat
                     prefill_tps = evt.get("prefill_tps")
                     decode_tps = evt.get("decode_tps")
-                    if prefill_tps is None or decode_tps is None:
+                    elapsed_s = timings_obj.get("elapsed_seconds")
+                    if prefill_tps is None or decode_tps is None or not isinstance(elapsed_s, (int, float)):
                         timing = usage.get("timing") or {}
                         if timing.get("estimated") is True:
                             nonlocal_estimated = True
                         prefill_tps = prefill_tps or timing.get("prefill_tps")
                         decode_tps = decode_tps or timing.get("decode_tps")
-                    if isinstance(evt.get("timings"), dict) and evt["timings"].get("estimated") is True:
+                        if not isinstance(elapsed_s, (int, float)):
+                            elapsed_s = timing.get("elapsed_seconds")
+                    if isinstance(timings_obj, dict) and timings_obj.get("estimated") is True:
                         nonlocal_estimated = True
                     if nonlocal_estimated:
                         estimated_tps_used = True
@@ -565,18 +568,34 @@ if log_dir.is_dir():
                             if isinstance(val, (int, float)):
                                 bucket[key] += int(val)
                                 bucket_try[key] += int(val)
-                        if isinstance(prefill_tps, (int, float)) and isinstance(prompt_tokens, (int, float)) and prompt_tokens > 0:
-                            weight = float(prompt_tokens)
-                            bucket["prefill_sum"] += prefill_tps * weight
-                            bucket["prefill_weight"] += weight
-                            bucket_try["prefill_sum"] += prefill_tps * weight
-                            bucket_try["prefill_weight"] += weight
-                        if isinstance(decode_tps, (int, float)) and isinstance(completion_tokens, (int, float)) and completion_tokens > 0:
-                            weight = float(completion_tokens)
-                            bucket["decode_sum"] += decode_tps * weight
-                            bucket["decode_weight"] += weight
-                            bucket_try["decode_sum"] += decode_tps * weight
-                            bucket_try["decode_weight"] += weight
+                        prefill_time = 0.0
+                        decode_time = 0.0
+                        if (
+                            isinstance(prefill_tps, (int, float))
+                            and isinstance(prompt_tokens, (int, float))
+                            and prompt_tokens > 0
+                            and prefill_tps > 0
+                        ):
+                            prefill_time = float(prompt_tokens) / float(prefill_tps)
+                            bucket["prefill_time"] += prefill_time
+                            bucket_try["prefill_time"] += prefill_time
+                        if (
+                            isinstance(decode_tps, (int, float))
+                            and isinstance(completion_tokens, (int, float))
+                            and completion_tokens > 0
+                            and decode_tps > 0
+                        ):
+                            decode_time = float(completion_tokens) / float(decode_tps)
+                            bucket["decode_time"] += decode_time
+                            bucket_try["decode_time"] += decode_time
+                        if isinstance(elapsed_s, (int, float)) and elapsed_s > 0:
+                            bucket["elapsed_time"] += float(elapsed_s)
+                            bucket_try["elapsed_time"] += float(elapsed_s)
+                        elif prefill_time > 0 and decode_time > 0:
+                            # Fallback when server does not report elapsed_seconds explicitly.
+                            combined = prefill_time + decode_time
+                            bucket["elapsed_time"] += combined
+                            bucket_try["elapsed_time"] += combined
             if request_params is not None:
                 request_param_sets.append(request_params)
 
@@ -661,15 +680,14 @@ def summarize_usage(buckets):
         total["prompt"] += bucket.get("prompt", 0)
         total["completion"] += bucket.get("completion", 0)
         total["total"] += bucket.get("total", 0)
-        total["prefill_sum"] += bucket.get("prefill_sum", 0.0)
-        total["prefill_weight"] += bucket.get("prefill_weight", 0.0)
-        total["decode_sum"] += bucket.get("decode_sum", 0.0)
-        total["decode_weight"] += bucket.get("decode_weight", 0.0)
+        total["prefill_time"] += bucket.get("prefill_time", 0.0)
+        total["decode_time"] += bucket.get("decode_time", 0.0)
+        total["elapsed_time"] += bucket.get("elapsed_time", 0.0)
     return total
 
-def format_tps(sum_val, weight):
-    if weight and weight > 0:
-        return "{:.1f}".format(sum_val / weight)
+def format_tps(tokens, time_s):
+    if isinstance(tokens, (int, float)) and isinstance(time_s, (int, float)) and time_s > 0:
+        return "{:.1f}".format(float(tokens) / float(time_s))
     return "NA"
 
 if per_task_usage:
@@ -678,8 +696,9 @@ if per_task_usage:
         ("prompt_tokens", overall["prompt"]),
         ("completion_tokens", overall["completion"]),
         ("total_tokens", overall["total"]),
-        ("prefill_tps", format_tps(overall["prefill_sum"], overall["prefill_weight"])),
-        ("decode_tps", format_tps(overall["decode_sum"], overall["decode_weight"])),
+        ("prefill_tps", format_tps(overall["prompt"], overall["prefill_time"])),
+        ("decode_tps", format_tps(overall["completion"], overall["decode_time"])),
+        ("total_tps", format_tps(overall["total"], overall["elapsed_time"])),
     ]
     print_table("Token & speed summary (from response_meta)", rows, ["metric", "value"])
     if estimated_tps_used:
@@ -778,13 +797,14 @@ for task in sorted_tasks:
     prompt_tokens = bucket.get("prompt", 0)
     completion_tokens = bucket.get("completion", 0)
     total_tokens = bucket.get("total", 0)
-    prefill_tps = format_tps(bucket.get("prefill_sum", 0.0), bucket.get("prefill_weight", 0.0))
-    decode_tps = format_tps(bucket.get("decode_sum", 0.0), bucket.get("decode_weight", 0.0))
-    rows.append((task_request_id(task), task, prompt_tokens, completion_tokens, total_tokens, prefill_tps, decode_tps))
+    prefill_tps = format_tps(prompt_tokens, bucket.get("prefill_time", 0.0))
+    decode_tps = format_tps(completion_tokens, bucket.get("decode_time", 0.0))
+    total_tps = format_tps(total_tokens, bucket.get("elapsed_time", 0.0))
+    rows.append((task_request_id(task), task, prompt_tokens, completion_tokens, total_tokens, prefill_tps, decode_tps, total_tps))
 print_table(
     "Per-task tokens & speed (sorted by tool calls)",
     rows,
-    ["id", "task", "prompt_tok", "completion_tok", "total_tok", "prefill_tps", "decode_tps"],
+    ["id", "task", "prompt_tok", "completion_tok", "total_tok", "prefill_tps", "decode_tps", "total_tps"],
 )
 
 def format_flow(entries):

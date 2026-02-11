@@ -3547,11 +3547,18 @@ class TestCallApiRetries(unittest.TestCase):
         self.assertTrue(result["timings"].get("estimated"))
         self.assertAlmostEqual(result["timings"].get("prompt_per_second"), 5.0, places=2)
         self.assertAlmostEqual(result["timings"].get("predicted_per_second"), 2.0, places=2)
+        self.assertAlmostEqual(result["timings"].get("total_per_second"), 7.0, places=2)
 
     def test_format_usage_marks_estimated_tps(self):
         info = agent.format_usage_info(
             {"prompt_tokens": 10, "completion_tokens": 4},
-            {"prompt_per_second": 5.0, "predicted_per_second": 2.0, "estimated": True},
+            {
+                "prompt_per_second": 5.0,
+                "predicted_per_second": 2.0,
+                "total_per_second": 7.0,
+                "estimated": True,
+            },
         )
-        self.assertIn("prefill ~5 t/s", info)
-        self.assertIn("decode ~2.0 t/s", info)
+        self.assertIn("throughput ~7.0 t/s", info)
+        self.assertNotIn("prefill", info)
+        self.assertNotIn("decode", info)
