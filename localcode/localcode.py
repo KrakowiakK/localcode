@@ -939,21 +939,16 @@ def format_usage_info(usage: Optional[Dict[str, Any]], timings: Optional[Dict[st
     ttft = timing.get("ttft", 0)
     prefill_tps = (timings or {}).get("prompt_per_second", 0) or timing.get("prefill_tps", 0)
     decode_tps = (timings or {}).get("predicted_per_second", 0) or timing.get("decode_tps", 0)
-    total_tps = (timings or {}).get("total_per_second", 0)
     tps_estimated = bool((timings or {}).get("estimated", False) or timing.get("estimated", False))
     tps_mark = "~" if tps_estimated else ""
 
     parts = [f"{prompt_tokens}→{completion_tokens} tok"]
     if ttft:
         parts.append(f"TTFT {float(ttft):.2f}s")
-    if tps_estimated and total_tps:
-        # MLX fallback has only end-to-end elapsed time, so only total throughput is reliable.
-        parts.append(f"throughput {tps_mark}{float(total_tps):.1f} t/s")
-    else:
-        if prefill_tps:
-            parts.append(f"prefill {tps_mark}{float(prefill_tps):.0f} t/s")
-        if decode_tps:
-            parts.append(f"decode {tps_mark}{float(decode_tps):.1f} t/s")
+    if prefill_tps:
+        parts.append(f"prefill {tps_mark}{float(prefill_tps):.0f} t/s")
+    if decode_tps:
+        parts.append(f"decode {tps_mark}{float(decode_tps):.1f} t/s")
     return " | ".join(parts)
 
 

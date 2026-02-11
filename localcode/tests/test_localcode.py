@@ -3559,6 +3559,5 @@ class TestCallApiRetries(unittest.TestCase):
                 "estimated": True,
             },
         )
-        self.assertIn("throughput ~7.0 t/s", info)
-        self.assertNotIn("prefill", info)
-        self.assertNotIn("decode", info)
+        self.assertIn("prefill ~5 t/s", info)
+        self.assertIn("decode ~2.0 t/s", info)
