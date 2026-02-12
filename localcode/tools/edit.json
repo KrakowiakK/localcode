@@ -1,8 +1,11 @@
 {
   "name": "edit",
-  "aliases": ["replace_in_file", "edit_file"],
+  "aliases": [
+    "replace_in_file",
+    "edit_file"
+  ],
   "category": "write",
-  "description": "Edit part of an existing file by replacing one snippet with another.\n\nUseful for localized fixes where you know the exact text to change.\n\nArguments:\n- path: target source file path (test files are blocked)\n- old: exact current text to replace (whitespace-sensitive)\n- new: replacement text (must differ from old)\n\nAccepted arg aliases:\n- file / filename / file_path / filepath / file_name -> path\n- old_string / old_text / search / find / original / before -> old\n- new_string / new_text / replace / replacement / after -> new\n\nExamples:\n- replace_in_file({\"path\": \"foo.js\", \"old\": \"return a + b;\", \"new\": \"return a - b;\"})\n- replace_in_file({\"file\": \"foo.js\", \"old_string\": \"const x = 1;\", \"replacement\": \"const x = 2;\"})\n\nIf replacement fails because old text is not found or ambiguous, read the file and retry with a more exact snippet.",
+  "description": "Replace one exact snippet in an existing file. Use this after read/write for small corrective changes. If old text is not found, read current file and retry with exact text.",
   "feedback": {
     "must_read_before_editing": "FORMAT ERROR: {{tool:edit}} failed due to stale context.\nACTION: Call {{tool:read}}(path) for {{target}}, then retry {{tool:edit}} with exact current text.",
     "old_string_not_found": "ERROR: 'old' string not found in file. Common causes:\n1. Whitespace mismatch (tabs vs spaces, trailing spaces)\n2. String was modified since last read\n3. Guessing content instead of copying from read output\nACTION: Call {{tool:read}}({{target}}), then COPY the exact substring. For small files, use {{tool:write}} instead.",

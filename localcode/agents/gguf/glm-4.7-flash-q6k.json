@@ -11,11 +11,9 @@
   "max_tokens": 16000,
   "tool_choice": "auto",
   "cache": true,
-  "think": false,
   "tool_name_style": "canonical",
   "auto_tool_call_on_failure": true,
   "require_code_change": true,
-  "thinking_visibility": "show",
   "min_tool_calls": 1,
   "max_format_retries": 2,
   "max_batch_tool_calls": 20,
@@ -29,7 +27,6 @@
     "search_text",
     "plan_solution"
   ],
-  "native_thinking": false,
   "server_config": {
     "model_path": "~/.lmstudio/models/evilfreelancer/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q6_K.gguf",
     "context_window": 202752,

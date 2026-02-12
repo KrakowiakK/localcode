@@ -21,7 +21,7 @@
       "description": "Agent to call. Default: code-architect"
     },
     "timeout": {
-      "type": "integer",
+      "type": "number",
       "optional": true,
       "default": 300,
       "description": "Timeout in seconds (default: 300)"

@@ -307,13 +307,14 @@ for lang, task, outcomes, duration in entries:
     results[key] = {
         "pass1": bool(outcomes[0]) if outcomes else False,
         "pass2": bool(outcomes[1]) if len(outcomes) > 1 else None,
+        "pass_any": any(bool(x) for x in outcomes),
         "duration": duration,
     }
 
 count = len(results)
 pass1 = sum(1 for r in results.values() if r["pass1"])
 pass2 = sum(1 for r in results.values() if r["pass2"] is True)
-pass_any = sum(1 for r in results.values() if r["pass1"] or r["pass2"])
+pass_any = sum(1 for r in results.values() if r["pass_any"])
 durations = [r["duration"] for r in results.values() if isinstance(r["duration"], (int, float))]
 avg_duration = sum(durations) / len(durations) if durations else None
 

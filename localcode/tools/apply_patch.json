@@ -5,7 +5,7 @@
     "patch_file"
   ],
   "category": "write",
-  "description": "Apply a unified patch to one or more files.\n\nFormat:\n*** Begin Patch\n*** Update File: path/to/file\n@@ anchor line copied from file\n context line (space-prefixed)\n-line to remove\n+line to add\n context line\n*** End Patch\n\nGuidance:\n- Use exact context lines from current file content.\n- Keep anchors unique when possible.\n- If patch context fails, re-read file and rebuild patch from current content.\n- For full rewrites or repeated patch failures, prefer {{tool:write}}.\n\nExamples:\n- {{tool:apply_patch}}({\"patch\": \"*** Begin Patch\\n*** Update File: a.js\\n@@ function f() {\\n-  return 1;\\n+  return 2;\\n }\\n*** End Patch\"})\n\nReturns: ok: N file(s) changed, +additions -removals",
+  "description": "Apply patch blocks with exact context lines. Use for precise structured edits, especially multi-file or hunk-style updates. If patch fails, re-read and patch current content.",
   "feedback": {
     "patch_context_not_found": "ERROR: @@ context line not found in file. Common causes:\n1. @@ has multiple lines (WRONG) - must be ONE single line\n2. @@ is blank or partial (WRONG) - must be complete line from file\n3. Line was modified since last read\nACTION: Call {{tool:read}}({{target}}), then COPY a unique line VERBATIM for @@. For small files, use {{tool:write}} instead.",
     "patch_context_not_unique": "FORMAT ERROR: {{tool:apply_patch}} failed: patch context not unique.\nACTION: Call {{tool:read}}(path) for {{target}}, then retry {{tool:apply_patch}} with MORE unique context lines, OR switch to {{tool:edit}} / {{tool:write}} if the file is small.",

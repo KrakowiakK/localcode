@@ -3,6 +3,9 @@ File writing tool handlers: write(), edit().
 """
 
 import os
+import hashlib
+import difflib
+import re
 import subprocess
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,10 +21,20 @@ from localcode.tool_handlers._state import (
     FILE_VERSIONS,
     WRITTEN_PATHS,
     _NOOP_COUNTS,
+    _mutation_brief_line,
+    _mutation_decision_hint,
+    _mutation_state_line,
+    _record_mutation,
     _require_args_dict,
+    _short_sha_text,
     _track_file_version,
 )
-from localcode.tool_handlers._path import _find_file_in_sandbox, _should_block_test_edit, _validate_path
+from localcode.tool_handlers._path import (
+    _find_file_in_sandbox,
+    _should_block_test_edit,
+    _validate_path,
+    to_display_path,
+)
 
 
 def _tool_hints_enabled() -> bool:
@@ -76,7 +89,8 @@ def _find_and_read_spec() -> str:
     for i, line in enumerate(lines):
         out_parts.append(f"{i + 1:4}| {line}")
 
-    return f"\n\nYou have not read the test file. Here are the tests:\n=== {spec_path} ===\n{''.join(out_parts)}"
+    display_spec = to_display_path(spec_path)
+    return f"\n\nYou have not read the test file. Here are the tests:\n=== {display_spec} ===\n{''.join(out_parts)}"
 
 
 def _js_syntax_ok(code: str) -> bool:
@@ -101,6 +115,148 @@ def _js_syntax_ok(code: str) -> bool:
                 pass
 
 
+def _content_line_count(text: str) -> int:
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _content_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _changed_lines_est(previous: str, current: str) -> int:
+    prev_lines = previous.splitlines()
+    curr_lines = current.splitlines()
+    matcher = difflib.SequenceMatcher(a=prev_lines, b=curr_lines, autojunk=False)
+    changed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "replace":
+            changed += max(i2 - i1, j2 - j1)
+        elif tag == "delete":
+            changed += i2 - i1
+        elif tag == "insert":
+            changed += j2 - j1
+    return changed
+
+
+def _change_summary(previous: str, current: str) -> str:
+    prev_lines = previous.splitlines()
+    curr_lines = current.splitlines()
+    changed_lines_est = _changed_lines_est(previous, current)
+    return (
+        f"change_summary: prev_sha256={_content_digest(previous)} "
+        f"new_sha256={_content_digest(current)} "
+        f"changed_lines~={changed_lines_est} "
+        f"line_delta={len(curr_lines) - len(prev_lines)} "
+        f"char_delta={len(current) - len(previous)}"
+    )
+
+
+def _changed_symbols(previous: str, current: str, max_symbols: int = 10) -> List[str]:
+    js_keywords = {
+        "if", "for", "while", "switch", "catch", "return", "throw", "new",
+        "typeof", "instanceof", "void", "delete", "in", "of", "do", "else",
+        "case", "default", "break", "continue", "try", "finally", "await",
+        "yield", "class", "function", "const", "let", "var", "import", "export",
+        "extends", "super",
+    }
+
+    def _add_symbol(raw: str, out: List[str], seen: set) -> None:
+        name = raw.strip()
+        if not name or name in js_keywords:
+            return
+        if name in seen:
+            return
+        seen.add(name)
+        out.append(name)
+
+    diff_lines = list(
+        difflib.unified_diff(
+            previous.splitlines(),
+            current.splitlines(),
+            fromfile="before",
+            tofile="after",
+            lineterm="",
+            n=1,
+        )
+    )
+    symbols: List[str] = []
+    seen = set()
+    for line in diff_lines:
+        if not (line.startswith("+") or line.startswith("-")):
+            continue
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        text = line[1:].strip()
+        m_class = re.match(r"^(?:export\s+)?class\s+([A-Za-z_]\w*)\b", text)
+        if m_class:
+            _add_symbol(f"class:{m_class.group(1)}", symbols, seen)
+
+        m_function = re.match(r"^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_]\w*)\s*\(", text)
+        if m_function:
+            _add_symbol(f"fn:{m_function.group(1)}", symbols, seen)
+
+        m_method = re.match(r"^(?:async\s+)?([A-Za-z_]\w*)\s*\([^=]*\)\s*\{?$", text)
+        if m_method:
+            name = m_method.group(1)
+            if name not in js_keywords:
+                _add_symbol(f"fn:{name}", symbols, seen)
+
+        m_const_fn = re.match(
+            r"^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_]\w*)\s*=>",
+            text,
+        )
+        if m_const_fn:
+            _add_symbol(f"fn:{m_const_fn.group(1)}", symbols, seen)
+        if len(symbols) >= max_symbols:
+            break
+    return symbols
+
+
+def _changed_line_preview(previous: str, current: str, max_lines: int = 6) -> str:
+    prev_lines = previous.splitlines()
+    curr_lines = current.splitlines()
+    matcher = difflib.SequenceMatcher(a=prev_lines, b=curr_lines, autojunk=False)
+
+    changed_indexes: List[int] = []
+    seen = set()
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if j1 < j2:
+            for idx in range(j1, min(j2, j1 + max_lines)):
+                if idx not in seen:
+                    seen.add(idx)
+                    changed_indexes.append(idx)
+                if len(changed_indexes) >= max_lines:
+                    break
+        elif curr_lines:
+            idx = min(max(j1 - 1, 0), len(curr_lines) - 1)
+            if idx not in seen:
+                seen.add(idx)
+                changed_indexes.append(idx)
+        if len(changed_indexes) >= max_lines:
+            break
+
+    if not changed_indexes:
+        return "changed_lines_preview:\n(no changed lines captured)"
+
+    out = ["changed_lines_preview:"]
+    for idx in changed_indexes[:max_lines]:
+        line_text = curr_lines[idx] if 0 <= idx < len(curr_lines) else ""
+        out.append(f"{idx + 1:4}| {line_text}")
+    return "\n".join(out)
+
+
+def _current_file_sha(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return _short_sha_text(f.read())
+    except Exception:
+        return "unknown"
+
+
 def write(args: Any) -> str:
     args, err = _require_args_dict(args, "write")
     if err:
@@ -122,6 +278,7 @@ def write(args: Any) -> str:
     if _should_block_test_edit(path):
         basename = os.path.basename(path)
         return f"error: cannot write to {basename}; test files are read-only. Use write_file on your source code file only."
+    display_path = to_display_path(path)
 
     content = args.get("content")
     if content is None:
@@ -142,16 +299,38 @@ def write(args: Any) -> str:
             _NOOP_COUNTS.setdefault(path, {})
             _NOOP_COUNTS[path]["write"] = _NOOP_COUNTS[path].get("write", 0) + 1
             noop_n = _NOOP_COUNTS[path]["write"]
+            file_state = (
+                f"file_state: lines={_content_line_count(content)} "
+                f"chars={len(content)} sha256={_content_digest(content)}"
+            )
+            mutation = _record_mutation(
+                op="write",
+                path=path,
+                changed=False,
+                before_sha=_content_digest(content),
+                after_sha=_content_digest(content),
+                changed_lines_est=0,
+                noop_streak_for_file=noop_n,
+            )
+            decision_hint = _mutation_decision_hint(mutation)
+            state_brief = _mutation_brief_line(mutation)
+            state_line = _mutation_state_line(mutation)
             if noop_n == 1:
                 # First noop: keep as success so model can finish when file is already correct.
                 return (
                     "ok: no changes - file already has this content.\n"
-                    "Action: use different content if a fix is still needed, or call finish if this is correct.\n"
-                    "Tip: call read(path) if you need to inspect current file content."
+                    f"{file_state}\n"
+                    f"{decision_hint}\n"
+                    f"{state_brief}\n"
+                    f"{state_line}"
                 )
             return (
                 f"error: repeated no-op write for {os.path.basename(path)}. "
-                "Write different content, or call finish if implementation is already correct."
+                "Write different content, or call finish if implementation is already correct.\n"
+                f"{file_state}\n"
+                f"{decision_hint}\n"
+                f"{state_brief}\n"
+                f"{state_line}"
             )
 
     parent_dir = os.path.dirname(path)
@@ -176,13 +355,83 @@ def write(args: Any) -> str:
 
     if is_new_file:
         additions = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        return f"ok: created {path}, +{additions} lines{spec_inject}{write_hint}"
+        file_state = (
+            f"file_state: lines={_content_line_count(content)} "
+            f"chars={len(content)} sha256={_content_digest(content)}"
+        )
+        mutation = _record_mutation(
+            op="write",
+            path=path,
+            changed=True,
+            before_sha=_short_sha_text(""),
+            after_sha=_content_digest(content),
+            changed_lines_est=_changed_lines_est("", content),
+            changed_symbols=_changed_symbols("", content),
+            noop_streak_for_file=0,
+        )
+        decision_hint = _mutation_decision_hint(mutation)
+        state_brief = _mutation_brief_line(mutation)
+        state_line = _mutation_state_line(mutation)
+        loop_hint = ""
+        if int(mutation.get("write_streak_for_file", 0) or 0) >= 2:
+            loop_hint = (
+                f"\nloop_guard: repeated full-file write streak={mutation.get('write_streak_for_file')} "
+                "on this file; prefer edit/apply_patch or finish."
+            )
+        changed_preview = _changed_line_preview("", content)
+        return (
+            f"ok: created {display_path}, +{additions} lines\n"
+            f"{file_state}\n"
+            f"{decision_hint}\n"
+            f"{state_brief}\n"
+            f"{state_line}\n"
+            f"{changed_preview}\n"
+            f"{loop_hint}"
+            f"{spec_inject}{write_hint}"
+        )
 
     old_lines = old_content.count("\n")
     new_lines = content.count("\n")
     additions = max(0, new_lines - old_lines)
     removals = max(0, old_lines - new_lines)
-    return f"ok: updated {path}, +{additions} -{removals} lines{spec_inject}{write_hint}"
+    file_state = (
+        f"file_state: lines={_content_line_count(content)} "
+        f"chars={len(content)} sha256={_content_digest(content)}"
+    )
+    changed_lines = _changed_lines_est(old_content, content)
+    symbols = _changed_symbols(old_content, content)
+    mutation = _record_mutation(
+        op="write",
+        path=path,
+        changed=True,
+        before_sha=_content_digest(old_content),
+        after_sha=_content_digest(content),
+        changed_lines_est=changed_lines,
+        changed_symbols=symbols,
+        noop_streak_for_file=0,
+    )
+    decision_hint = _mutation_decision_hint(mutation)
+    state_brief = _mutation_brief_line(mutation)
+    state_line = _mutation_state_line(mutation)
+    loop_hint = ""
+    if int(mutation.get("write_streak_for_file", 0) or 0) >= 2:
+        loop_hint = (
+            f"\nloop_guard: repeated full-file write streak={mutation.get('write_streak_for_file')} "
+            "on this file; prefer edit/apply_patch or finish."
+        )
+    summary = _change_summary(old_content, content)
+    changed_preview = _changed_line_preview(old_content, content)
+    return (
+        f"ok: updated {display_path}, +{additions} -{removals} lines\n"
+        f"{file_state}\n"
+        f"{decision_hint}\n"
+        f"{state_brief}\n"
+        f"{state_line}\n"
+        f"{summary}\n"
+        f"{changed_preview}\n"
+        f"{loop_hint}"
+        f"{spec_inject}{write_hint}"
+    )
 
 
 def edit(args: Any) -> str:
@@ -206,6 +455,7 @@ def edit(args: Any) -> str:
     if _should_block_test_edit(path):
         basename = os.path.basename(path)
         return f"error: cannot edit {basename}; test files are read-only. Use replace_in_file on your source code file only."
+    display_path = to_display_path(path)
 
     old = args.get("old")
     new = args.get("new")
@@ -221,7 +471,7 @@ def edit(args: Any) -> str:
                 f"Current file content:\n{text}"
             )
         except Exception:
-            return f"error: file not found: {path}"
+            return f"error: file not found: {display_path}"
 
     if not isinstance(old, str) or not isinstance(new, str):
         return "error: old and new must be strings"
@@ -234,23 +484,42 @@ def edit(args: Any) -> str:
     if old == new:
         _NOOP_COUNTS[path]["edit_noop"] = _NOOP_COUNTS[path].get("edit_noop", 0) + 1
         noop_n = _NOOP_COUNTS[path]["edit_noop"]
+        current_sha = _current_file_sha(path)
+        mutation = _record_mutation(
+            op="edit",
+            path=path,
+            changed=False,
+            before_sha=current_sha,
+            after_sha=current_sha,
+            changed_lines_est=0,
+            noop_streak_for_file=noop_n,
+        )
+        decision_hint = _mutation_decision_hint(mutation)
+        state_brief = _mutation_brief_line(mutation)
+        state_line = _mutation_state_line(mutation)
         if noop_n == 1:
             return (
                 f"error: no changes - old equals new in {basename}. "
-                "Use a different 'new' value, or switch to write_file for full rewrite."
+                "Use a different 'new' value, or switch to write_file for full rewrite.\n"
+                f"{decision_hint}\n"
+                f"{state_brief}\n"
+                f"{state_line}"
             )
         if noop_n == 2:
             return (
                 f"error: repeated no-op edit in {basename}. "
-                "Read the latest file content and apply a real change, or finish if already correct."
+                "Read the latest file content and apply a real change, or finish if already correct.\n"
+                f"{decision_hint}\n"
+                f"{state_brief}\n"
+                f"{state_line}"
             )
-        return f"error: repeated no-op edit in {basename}"
+        return f"error: repeated no-op edit in {basename}\n{decision_hint}\n{state_brief}\n{state_line}"
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
     except Exception:
-        return f"error: file not found: {path}"
+        return f"error: file not found: {display_path}"
 
     if old not in text:
         read_hint = ""
@@ -292,4 +561,35 @@ def edit(args: Any) -> str:
     if path in _NOOP_COUNTS:
         _NOOP_COUNTS[path].pop("edit_noop", None)
 
-    return f"ok: {count if args.get('all') else 1} replacement(s). Edit applied. If your fix is complete, say done. Do not make unnecessary additional edits."
+    replacement_count = count if args.get("all") else 1
+    file_state = (
+        f"file_state: lines={_content_line_count(replacement)} "
+        f"chars={len(replacement)} sha256={_content_digest(replacement)}"
+    )
+    changed_lines = _changed_lines_est(text, replacement)
+    symbols = _changed_symbols(text, replacement)
+    mutation = _record_mutation(
+        op="edit",
+        path=path,
+        changed=True,
+        before_sha=_content_digest(text),
+        after_sha=_content_digest(replacement),
+        changed_lines_est=changed_lines,
+        changed_symbols=symbols,
+        noop_streak_for_file=0,
+    )
+    decision_hint = _mutation_decision_hint(mutation)
+    state_brief = _mutation_brief_line(mutation)
+    state_line = _mutation_state_line(mutation)
+    summary = _change_summary(text, replacement)
+    changed_preview = _changed_line_preview(text, replacement)
+    return (
+        f"ok: {replacement_count} replacement(s). Edit applied in {basename}.\n"
+        f"{file_state}\n"
+        f"{decision_hint}\n"
+        f"{state_brief}\n"
+        f"{state_line}\n"
+        f"{summary}\n"
+        f"{changed_preview}\n"
+        "Action: if this satisfies requirements, call finish; otherwise make the next targeted edit."
+    )

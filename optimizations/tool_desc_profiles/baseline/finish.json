@@ -1,0 +1,23 @@
+{
+  "name": "finish",
+  "aliases": ["finish_run", "done", "complete_task"],
+  "category": "control",
+  "description": "Signal that your implementation is complete.\n\nUse this when you are done with code changes and want to end the run.\n- status is optional: done | blocked | incomplete\n- summary is optional short note\n\nExamples:\n- finish({\"status\": \"done\", \"summary\": \"Implemented parser and updated edge cases\"})\n- finish({\"status\": \"blocked\", \"summary\": \"Missing required source file\"})\n\nReturns: ok: finish recorded",
+  "additionalProperties": false,
+  "parameters": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "done",
+        "blocked",
+        "incomplete"
+      ],
+      "optional": true
+    },
+    "summary": {
+      "type": "string",
+      "optional": true
+    }
+  },
+  "handler": "finish"
+}

@@ -12,7 +12,7 @@ import subprocess
 import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from localcode.tool_handlers._state import SANDBOX_ROOT, MAX_FILE_SIZE
 from localcode.tool_handlers import (
@@ -21,6 +21,118 @@ from localcode.tool_handlers import (
     _require_args_dict,
     _validate_path,
 )
+
+
+def _log_sidechannel_event(event: str, payload: Dict[str, Any]) -> None:
+    """Best-effort structured logging for model side-channel calls."""
+    try:
+        from localcode.middleware import logging_hook  # local import avoids hard dependency at module import time
+
+        logging_hook.log_event(event, payload)
+    except Exception:
+        # Side-channel logging must never break tool execution.
+        pass
+
+
+def _clip_text(text: Any, max_chars: int) -> str:
+    if text is None:
+        return ""
+    out = str(text).strip()
+    if max_chars > 0 and len(out) > max_chars:
+        out = out[:max_chars].rstrip() + "..."
+    return out
+
+
+def _summarize_tool_calls(tool_calls: Any, max_args_chars: int) -> str:
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return ""
+    parts: List[str] = []
+    for tc in tool_calls[:4]:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") or {}
+        if not isinstance(fn, dict):
+            continue
+        name = str(fn.get("name") or "tool")
+        raw_args = fn.get("arguments")
+        args_text = _clip_text(raw_args if raw_args is not None else "{}", max_args_chars)
+        parts.append(f"{name}({args_text})")
+    if not parts:
+        return ""
+    return "History actions: " + "; ".join(parts)
+
+
+def _sanitize_history_messages(
+    current_messages: List[Dict[str, Any]],
+    include_tool_messages: bool,
+    tool_result_max_chars: int,
+    tool_call_args_max_chars: int,
+    include_tool_call_summaries: bool = False,
+) -> List[Dict[str, Any]]:
+    """Flatten history to role/content only to avoid accidental tool-call mode in self-calls."""
+    sanitized: List[Dict[str, Any]] = []
+    for msg in current_messages:
+        role = msg.get("role")
+        if role == "user":
+            content = _clip_text(msg.get("content"), 2000)
+            if content:
+                sanitized.append({"role": "user", "content": content})
+            continue
+
+        if role == "assistant":
+            chunks: List[str] = []
+            content = _clip_text(msg.get("content"), 2000)
+            if content:
+                chunks.append(content)
+            if include_tool_messages and include_tool_call_summaries:
+                tc_summary = _summarize_tool_calls(msg.get("tool_calls"), tool_call_args_max_chars)
+                if tc_summary:
+                    chunks.append(tc_summary)
+            if chunks:
+                sanitized.append({"role": "assistant", "content": "\n".join(chunks)})
+            continue
+
+        if role == "tool" and include_tool_messages:
+            tool_name = str(msg.get("name") or "tool")
+            result = _clip_text(msg.get("content"), tool_result_max_chars)
+            if result:
+                sanitized.append({"role": "assistant", "content": f"Tool result ({tool_name}): {result}"})
+
+    return sanitized
+
+
+def _pick_prompt_arg(
+    args: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Tuple[Optional[str], List[str]]:
+    prompt_keys: List[str] = []
+    configured = config.get("prompt_param")
+    if isinstance(configured, str) and configured.strip():
+        prompt_keys.append(configured.strip())
+    elif isinstance(configured, list):
+        for item in configured:
+            if isinstance(item, str) and item.strip() and item.strip() not in prompt_keys:
+                prompt_keys.append(item.strip())
+
+    # Backward-compatible defaults.
+    for key in ("prompt", "content", "thought", "question", "query", "request", "text"):
+        if key not in prompt_keys:
+            prompt_keys.append(key)
+
+    for key in prompt_keys:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value, prompt_keys
+    return None, prompt_keys
+
+
+def _postprocess_think_result(raw: str, max_chars: int = 1200) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "error: think side-channel returned empty response"
+    if max_chars > 0 and len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "..."
+    return text
 
 
 def _load_prompt_file(relative_path: str, base_dir: str) -> str:
@@ -38,6 +150,12 @@ def _self_call(
     timeout: int = 120,
     include_history: bool = True,
     user_prefix: str = "",
+    include_tool_messages: bool = True,
+    include_tool_call_summaries: bool = False,
+    history_sanitize: bool = False,
+    history_tool_result_chars: int = 500,
+    history_tool_call_args_chars: int = 180,
+    tool_choice: Optional[str] = "none",
     *,
     api_url: str = "",
     model: str = "",
@@ -49,9 +167,20 @@ def _self_call(
 
     history_messages = []
     if include_history:
-        for msg in current_messages:
-            if msg.get("role") in ("user", "assistant", "tool"):
-                history_messages.append(msg)
+        if history_sanitize:
+            history_messages = _sanitize_history_messages(
+                current_messages=current_messages,
+                include_tool_messages=include_tool_messages,
+                tool_result_max_chars=max(80, int(history_tool_result_chars or 500)),
+                tool_call_args_max_chars=max(40, int(history_tool_call_args_chars or 180)),
+                include_tool_call_summaries=include_tool_call_summaries,
+            )
+        else:
+            for msg in current_messages:
+                if msg.get("role") == "tool" and not include_tool_messages:
+                    continue
+                if msg.get("role") in ("user", "assistant", "tool"):
+                    history_messages.append(msg)
 
     user_content = f"{user_prefix}{prompt}" if user_prefix else prompt
 
@@ -67,6 +196,8 @@ def _self_call(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if isinstance(tool_choice, str) and tool_choice.strip():
+        request_data["tool_choice"] = tool_choice.strip()
 
     try:
         req = urllib.request.Request(
@@ -96,6 +227,12 @@ def _self_call_batch(
     timeout: int = 120,
     include_history: bool = True,
     max_concurrent: int = 4,
+    include_tool_messages: bool = True,
+    include_tool_call_summaries: bool = False,
+    history_sanitize: bool = False,
+    history_tool_result_chars: int = 500,
+    history_tool_call_args_chars: int = 180,
+    tool_choice: Optional[str] = "none",
     *,
     api_url: str = "",
     model: str = "",
@@ -113,6 +250,12 @@ def _self_call_batch(
             max_tokens=max_tokens,
             timeout=timeout,
             include_history=include_history,
+            include_tool_messages=include_tool_messages,
+            include_tool_call_summaries=include_tool_call_summaries,
+            history_sanitize=history_sanitize,
+            history_tool_result_chars=history_tool_result_chars,
+            history_tool_call_args_chars=history_tool_call_args_chars,
+            tool_choice=tool_choice,
             api_url=api_url,
             model=model,
             current_messages=current_messages,
@@ -290,14 +433,21 @@ def make_model_call_handler(
                 timeout=config.get("timeout", 120),
                 include_history=config.get("include_history", True),
                 max_concurrent=config.get("max_concurrent", 4),
+                include_tool_messages=config.get("include_tool_messages", True),
+                include_tool_call_summaries=config.get("include_tool_call_summaries", False),
+                history_sanitize=config.get("history_sanitize", False),
+                history_tool_result_chars=int(config.get("history_tool_result_chars", 500) or 500),
+                history_tool_call_args_chars=int(config.get("history_tool_call_args_chars", 180) or 180),
+                tool_choice=config.get("tool_choice", "none"),
                 api_url=api_url,
                 model=model,
                 current_messages=current_messages,
             )
 
-        prompt = args.get("prompt") or args.get("content")
+        prompt, prompt_keys = _pick_prompt_arg(args, config)
         if not prompt or not isinstance(prompt, str):
-            return "error: prompt is required and must be a string"
+            accepted = ", ".join(prompt_keys)
+            return f"error: prompt is required and must be a string (accepted keys: {accepted})"
 
         if mode == "subprocess":
             agent = args.get("agent", config.get("default_agent", "code-architect"))
@@ -319,18 +469,72 @@ def make_model_call_handler(
             # Log for debugging (preserves original think behavior)
             print(f"\n[{tool_name.upper()}] stage={stage or 'none'} prompt={prompt}\n", file=sys.stderr)
 
-        return _self_call(
+        include_tool_messages = config.get("include_tool_messages", True)
+        include_tool_call_summaries = config.get("include_tool_call_summaries", False)
+        history_sanitize = config.get("history_sanitize", False)
+        history_tool_result_chars = int(config.get("history_tool_result_chars", 500) or 500)
+        history_tool_call_args_chars = int(config.get("history_tool_call_args_chars", 180) or 180)
+        temperature = config.get("temperature", 0.3)
+        max_tokens = config.get("max_tokens", 4000)
+        timeout = config.get("timeout", 120)
+
+        _log_sidechannel_event("model_call_sidechannel_request", {
+            "tool": tool_name,
+            "mode": mode,
+            "system_prompt_file": config.get("system_prompt_file"),
+            "stage_param": config.get("stage_param"),
+            "include_history": bool(config.get("include_history", True)),
+            "history_sanitize": bool(history_sanitize),
+            "tool_choice": config.get("tool_choice", "none"),
+            "prompt_preview": _clip_text(prompt, 220),
+        })
+
+        result = _self_call(
             prompt=prompt,
             system_prompt=system_prompt,
-            temperature=config.get("temperature", 0.3),
-            max_tokens=config.get("max_tokens", 4000),
-            timeout=config.get("timeout", 120),
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
             include_history=config.get("include_history", True),
             user_prefix=config.get("user_prefix", ""),
+            include_tool_messages=include_tool_messages,
+            include_tool_call_summaries=include_tool_call_summaries,
+            history_sanitize=history_sanitize,
+            history_tool_result_chars=history_tool_result_chars,
+            history_tool_call_args_chars=history_tool_call_args_chars,
+            tool_choice=config.get("tool_choice", "none"),
             api_url=api_url,
             model=model,
             current_messages=current_messages,
         )
+        _log_sidechannel_event("model_call_sidechannel_response", {
+            "tool": tool_name,
+            "mode": mode,
+            "is_error": str(result or "").lower().startswith("error:"),
+            "response_preview": _clip_text(result, 220),
+            "response_len": len(str(result or "")),
+        })
+        if tool_name == "think":
+            text = str(result or "")
+            _log_sidechannel_event("think_sidechannel_attempt", {
+                "tool": tool_name,
+                "attempt": 1,
+                "mode": "primary",
+                "is_error": text.lower().startswith("error:"),
+                "validation": "disabled",
+                "response_preview": _clip_text(text, 220),
+                "response_len": len(text),
+            })
+            _log_sidechannel_event("think_sidechannel_done", {
+                "tool": tool_name,
+                "attempts_total": 1,
+                "quality_retries": 0,
+                "final_is_error": text.lower().startswith("error:"),
+                "validation": "disabled",
+            })
+            max_chars = int(config.get("result_max_chars", 1200) or 1200)
+            return _postprocess_think_result(text, max_chars=max_chars)
+        return result
 
     handler.__name__ = f"model_call_{tool_name}"
     return handler

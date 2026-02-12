@@ -40,6 +40,7 @@ from localcode.tool_handlers._path import (
     _is_ignored_path,
     _is_path_within_sandbox,
     _validate_path,
+    to_display_path,
 )
 
 # _sandbox: shell security

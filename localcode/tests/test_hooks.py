@@ -150,7 +150,19 @@ class TestFeedbackHook:
         }
         result = hooks.emit("tool_after", data)
         assert result["feedback_reason"] == "write_repeated_noop"
-        assert "diff=true" in result["feedback_text"]
+        assert "context is missing or stale" in result["feedback_text"]
+
+    def test_feedback_path_value_is_sanitized(self):
+        data = {
+            "tool_name": "write",
+            "result": "error: repeated no-op write for react.js. Write different content, or call finish if implementation is already correct.",
+            "is_error": True,
+            "path_value": "/Users/example/private/react.js",
+        }
+        result = hooks.emit("tool_after", data)
+        assert result["feedback_reason"] == "write_repeated_noop"
+        assert "/Users/example/private" not in result["feedback_text"]
+        assert "react.js" in result["feedback_text"]
 
     def test_write_missing_content(self):
         data = {
@@ -345,6 +357,73 @@ class TestConversationDump:
             "messages": [],
         })
         assert "conversation_dump" not in result
+
+    def test_dump_writes_last_request_snapshot(self):
+        conversation_dump.install()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "test.jsonl")
+            snapshot = {
+                "model": "qwen3-coder-next",
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "task"},
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}},
+                ],
+                "tool_choice": "auto",
+            }
+            result = hooks.emit("agent_end", {
+                "log_path": log_path,
+                "system_prompt": "You are helpful.",
+                "messages": [{"role": "user", "content": "hello"}],
+                "last_request_snapshot": snapshot,
+            })
+            dump = result.get("conversation_dump")
+            assert dump is not None
+            assert "request_raw" in dump
+            assert os.path.exists(dump["request_raw"])
+            assert os.path.exists(dump["raw"])
+            with open(dump["request_raw"], "r", encoding="utf-8") as f:
+                request_data = json.load(f)
+            assert request_data["model"] == "qwen3-coder-next"
+            assert isinstance(request_data.get("tools"), list)
+            assert request_data["tool_choice"] == "auto"
+            assert "history_raw" in dump
+            assert os.path.exists(dump["history_raw"])
+            with open(dump["history_raw"], "r", encoding="utf-8") as f:
+                history_data = json.load(f)
+            assert isinstance(history_data, list)
+            assert history_data[0]["role"] == "system"
+
+    def test_dump_serializes_snapshot_with_non_json_values(self):
+        conversation_dump.install()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "test.jsonl")
+            snapshot = {
+                "model": "qwen3-coder-next",
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "task"},
+                ],
+                "tools": [
+                    {"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}},
+                ],
+                "non_serializable": {"vals": {1, 2, 3}},
+            }
+            result = hooks.emit("agent_end", {
+                "log_path": log_path,
+                "system_prompt": "You are helpful.",
+                "messages": [{"role": "user", "content": "hello"}],
+                "last_request_snapshot": snapshot,
+            })
+            dump = result.get("conversation_dump")
+            assert dump is not None
+            with open(dump["request_raw"], "r", encoding="utf-8") as f:
+                request_data = json.load(f)
+            assert request_data["model"] == "qwen3-coder-next"
+            assert isinstance(request_data.get("tools"), list)
+            assert isinstance(request_data["non_serializable"]["vals"], list)
 
 
 class TestLoggingHook:

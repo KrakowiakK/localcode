@@ -71,6 +71,7 @@ def make_openai_tools(
             default = None
             default_set = False
             min_length = None
+            enum_values = None
             if isinstance(pt, str):
                 is_optional = pt.endswith("?")
                 base_type = pt.rstrip("?")
@@ -90,6 +91,14 @@ def make_openai_tools(
                     default = pt["default"]
                 if isinstance(pt.get("minLength"), int):
                     min_length = pt["minLength"]
+                enum_raw = pt.get("enum")
+                if isinstance(enum_raw, list):
+                    normalized_enum: List[Any] = []
+                    for val in enum_raw:
+                        if isinstance(val, (str, int, float, bool)) or val is None:
+                            normalized_enum.append(val)
+                    if normalized_enum:
+                        enum_values = normalized_enum
             if not base_type:
                 continue
             if base_type == "array":
@@ -125,6 +134,8 @@ def make_openai_tools(
             prop = {"type": json_type}
             if description:
                 prop["description"] = description
+            if enum_values:
+                prop["enum"] = enum_values
             if default_set:
                 prop["default"] = default
             if min_length is not None:

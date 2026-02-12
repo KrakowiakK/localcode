@@ -1,8 +1,11 @@
 {
   "name": "read",
-  "aliases": ["read_file", "open_file"],
+  "aliases": [
+    "read_file",
+    "open_file"
+  ],
   "category": "read",
-  "description": "Read a file with line numbers (default 2000 lines, 250KB max).\n\nUseful for:\n- understanding current code before edits\n- checking exact context for {{tool:edit}}/{{tool:apply_patch}}\n- reviewing changes with diff=true\n\nAccepted arg aliases:\n- file / filename / file_path / filepath / file_name -> path\n\nNotes:\n- If a path is uncertain, use {{tool:ls}} or {{tool:glob}} first.\n- Use returned paths directly; avoid guessing paths.\n\nExamples:\n- {{tool:read}}({\"path\": \"file.js\"})\n- {{tool:read}}({\"file\": \"file.js\"})\n- {{tool:read}}({\"path\": \"file.js\", \"offset\": 100, \"limit\": 50})\n- {{tool:read}}({\"path\": \"file.js\", \"line_start\": 100, \"line_end\": 150})\n- {{tool:read}}({\"path\": \"file.js\", \"diff\": true})",
+  "description": "Read a file with line numbers. Use when text context is missing or stale. Do not repeat read on unchanged file unless new context is needed.",
   "feedback": {
     "read_is_directory": "FORMAT ERROR: {{tool:read}} failed: path is a directory.\nACTION: Use {{tool:ls}}(path) to list files, then call {{tool:read}} on a file path.",
     "read_file_not_found": "FORMAT ERROR: {{tool:read}} failed: file not found.\nACTION: Use {{tool:ls}}(path) or {{tool:glob}}(pat, path) to locate the correct file, then call {{tool:read}} with the valid path."
@@ -11,22 +14,22 @@
   "parameters": {
     "path": "string",
     "offset": {
-      "type": "integer",
+      "type": "number",
       "optional": true,
       "minimum": 0
     },
     "limit": {
-      "type": "integer",
+      "type": "number",
       "optional": true,
       "minimum": 1
     },
     "line_start": {
-      "type": "integer",
+      "type": "number",
       "optional": true,
       "minimum": 1
     },
     "line_end": {
-      "type": "integer",
+      "type": "number",
       "optional": true,
       "minimum": 1
     },

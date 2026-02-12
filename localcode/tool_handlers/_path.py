@@ -20,6 +20,41 @@ def _is_path_within_sandbox(path: str, sandbox_root: str) -> bool:
         return False
 
 
+def to_display_path(path: Optional[str]) -> str:
+    """Render path for model-facing tool output without leaking absolute roots."""
+    if path is None:
+        return ""
+    raw = str(path).strip()
+    if not raw:
+        return ""
+
+    sandbox_root = _state.SANDBOX_ROOT
+    try:
+        abs_candidate = os.path.abspath(os.path.expanduser(raw))
+    except Exception:
+        abs_candidate = raw
+
+    if sandbox_root:
+        try:
+            root_real = os.path.realpath(sandbox_root)
+            path_real = os.path.realpath(abs_candidate)
+            if _is_path_within_sandbox(path_real, root_real):
+                rel = os.path.relpath(path_real, root_real)
+                if rel == ".":
+                    return "."
+                return rel.replace(os.sep, "/")
+        except Exception:
+            pass
+
+    if not os.path.isabs(raw):
+        return raw.replace("\\", "/")
+
+    base = os.path.basename(raw.rstrip("/\\"))
+    if base:
+        return base
+    return raw.replace("\\", "/")
+
+
 def _validate_path(path: Optional[str], check_exists: bool = False) -> str:
     """
     Validate path is within sandbox (if enabled) and optionally exists.
@@ -34,13 +69,13 @@ def _validate_path(path: Optional[str], check_exists: bool = False) -> str:
     if sandbox_root:
         real_path = os.path.realpath(abs_path)
         if not _is_path_within_sandbox(real_path, sandbox_root):
-            raise ValueError(f"Access denied: path '{path}' (resolved: {real_path}) is outside sandbox root")
+            raise ValueError(f"Access denied: path '{to_display_path(path)}' is outside sandbox root")
         target = real_path
     else:
         target = abs_path
 
     if check_exists and not os.path.exists(target):
-        raise ValueError(f"File not found: {path} (resolved: {target})")
+        raise ValueError(f"File not found: {to_display_path(path)}")
 
     return target
 

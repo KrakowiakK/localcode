@@ -18,6 +18,7 @@ agent = importlib.import_module("localcode")
 # Direct reference to inner module for setting globals (module __setattr__ is not
 # invoked by `module.X = val` — PEP 562 only supports __getattr__/__dir__).
 _inner = importlib.import_module("localcode.localcode")
+_hooks = importlib.import_module("localcode.hooks")
 
 
 class TestNormalizeArgs(unittest.TestCase):
@@ -171,6 +172,65 @@ class TestWriteTool(unittest.TestCase):
         self.assertTrue(os.path.exists(path))
 
 
+class TestDisplayPathNormalization(unittest.TestCase):
+    """Ensure tool outputs show sandbox-relative paths, not absolute paths."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        _inner.SANDBOX_ROOT = self.temp_dir
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir)
+        _inner.SANDBOX_ROOT = None
+        agent.FILE_VERSIONS.clear()
+
+    def test_write_returns_relative_path(self):
+        target = os.path.join(self.temp_dir, "new.txt")
+        result = agent.write({"path": target, "content": "hello"})
+        self.assertIn("ok: created new.txt", result)
+        self.assertNotIn(self.temp_dir, result)
+
+    def test_read_diff_headers_are_relative(self):
+        target = os.path.join(self.temp_dir, "diff.txt")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("a\n")
+        _ = agent.read({"path": target})
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("a\nb\n")
+        diff = agent.read({"path": target, "diff": True})
+        self.assertIn("diff.txt (previous)", diff)
+        self.assertIn("diff.txt (current)", diff)
+        self.assertNotIn(self.temp_dir, diff)
+
+    def test_search_hits_are_relative(self):
+        os.makedirs(os.path.join(self.temp_dir, "sub"), exist_ok=True)
+        target = os.path.join(self.temp_dir, "sub", "react.js")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("const marker = 'needle';\n")
+        result = agent.search_fn({"pattern": "needle", "path": self.temp_dir})
+        self.assertIn("sub/react.js", result)
+        self.assertNotIn(self.temp_dir, result)
+
+    def test_shell_error_hides_absolute_workdir(self):
+        missing = os.path.join(self.temp_dir, "missing_dir")
+        payload = agent.shell({"command": "echo hi", "workdir": missing, "timeout_ms": 1000})
+        self.assertIn("workdir does not exist", payload)
+        self.assertNotIn(self.temp_dir, payload)
+
+    def test_read_error_hides_absolute_path(self):
+        missing = os.path.join(self.temp_dir, "missing.txt")
+        result = agent.read({"path": missing})
+        self.assertIn("file not found", result.lower())
+        self.assertNotIn(self.temp_dir, result)
+
+    def test_ls_error_hides_absolute_path(self):
+        missing = os.path.join(self.temp_dir, "missing_dir")
+        result = agent.ls_fn({"path": missing})
+        self.assertIn("not found", result.lower())
+        self.assertNotIn(self.temp_dir, result)
+
+
 class TestEditTool(unittest.TestCase):
     """Test edit tool."""
 
@@ -231,30 +291,12 @@ class TestFinishTool(unittest.TestCase):
 
     def test_finish_invalid_status(self):
         result = agent.finish_run({"status": "weird"})
-        self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
+        self.assertTrue(result.startswith("ok:"), f"Expected ok, got: {result}")
+        self.assertIn("normalized", result)
 
     def test_finish_summary_must_be_string(self):
         result = agent.finish_run({"summary": 123})
         self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
-
-
-class TestThinkTool(unittest.TestCase):
-    """Test think tool behavior."""
-
-    def test_think_records_note(self):
-        result = agent.think_tool({"thought": "Read source and spec, then patch compute graph updates."})
-        self.assertTrue(result.startswith("ok:"), f"Expected ok, got: {result}")
-        self.assertIn("thought recorded", result.lower())
-
-    def test_think_requires_non_empty_thought(self):
-        result = agent.think_tool({"thought": "   "})
-        self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
-        self.assertIn("non-empty", result.lower())
-
-    def test_think_requires_thought_param(self):
-        result = agent.think_tool({})
-        self.assertTrue(result.startswith("error:"), f"Expected error, got: {result}")
-        self.assertIn("thought", result.lower())
 
 
 class TestShellTool(unittest.TestCase):
@@ -714,6 +756,41 @@ class TestProcessToolCall(unittest.TestCase):
         self.assertEqual(result, "ok")
         self.assertEqual(args["line_end"], 105)
 
+    def test_process_tool_call_coerces_decimal_string_to_integer_like_field(self):
+        tools_dict = {"read": ("read", {"path": "string", "limit": "number?"}, lambda *_args, **_kwargs: "ok")}
+        tool_call = {
+            "function": {
+                "name": "read",
+                "arguments": "{\"path\":\"file.txt\",\"limit\":\"100.0\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(result, "ok")
+        self.assertEqual(args["limit"], 100)
+
+    def test_process_tool_call_coerces_float_to_integer_like_field(self):
+        tools_dict = {"search": ("search", {"pattern": "string", "max_results": "number?"}, lambda *_args, **_kwargs: "ok")}
+        tool_call = {
+            "function": {
+                "name": "search",
+                "arguments": "{\"pattern\":\"x\",\"max_results\":25.0}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(result, "ok")
+        self.assertEqual(args["max_results"], 25)
+
+    def test_process_tool_call_rejects_non_integral_integer_like_field(self):
+        tools_dict = {"ask_agent": ("ask", {"prompt": "string", "timeout": "number?"}, lambda *_args, **_kwargs: "ok")}
+        tool_call = {
+            "function": {
+                "name": "ask_agent",
+                "arguments": "{\"prompt\":\"x\",\"timeout\":12.5}",
+            }
+        }
+        _name, _args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertIn("expected whole number", result)
+
     def test_process_tool_call_alias_query_maps_to_grep_pat(self):
         tools_dict = {"grep": ("grep", {"pat": "string", "path": "string?"}, lambda a: f"ok:{a.get('pat')}")}
         tool_call = {
@@ -726,6 +803,46 @@ class TestProcessToolCall(unittest.TestCase):
         self.assertEqual(args.get("pat"), "needle")
         self.assertEqual(result, "ok:needle")
 
+    def test_process_tool_call_alias_question_maps_to_plan_solution_prompt(self):
+        tools_dict = {"plan_solution": ("plan", {"prompt": "string"}, lambda a: f"ok:{a.get('prompt')}")}
+        tool_call = {
+            "function": {
+                "name": "plan_solution",
+                "arguments": "{\"question\":\"Create plan\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(args.get("prompt"), "Create plan")
+        self.assertEqual(result, "ok:Create plan")
+
+    def test_process_tool_call_search_limit_alias_is_coerced_after_remap(self):
+        tools_dict = {
+            "search": ("search", {"pattern": "string", "max_results": "number?"}, lambda a: f"ok:{a.get('max_results')}")
+        }
+        tool_call = {
+            "function": {
+                "name": "search",
+                "arguments": "{\"pattern\":\"x\",\"limit\":\"20\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(args.get("max_results"), 20)
+        self.assertEqual(result, "ok:20")
+
+    def test_process_tool_call_ask_agent_secs_alias_is_coerced_after_remap(self):
+        tools_dict = {
+            "ask_agent": ("ask", {"prompt": "string", "timeout": "number?"}, lambda a: f"ok:{a.get('timeout')}")
+        }
+        tool_call = {
+            "function": {
+                "name": "ask_agent",
+                "arguments": "{\"prompt\":\"x\",\"secs\":\"60\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(args.get("timeout"), 60)
+        self.assertEqual(result, "ok:60")
+
 
 class TestToolSchema(unittest.TestCase):
     """Test OpenAI schema mapping."""
@@ -736,19 +853,93 @@ class TestToolSchema(unittest.TestCase):
         props = tools[0]["function"]["parameters"]["properties"]
         self.assertEqual(props["limit"]["type"], "number")
 
+    def test_make_openai_tools_preserves_enum(self):
+        tools_dict = {
+            "finish": (
+                "finish",
+                {"status": {"type": "string", "enum": ["done", "blocked", "incomplete"], "optional": True}},
+                lambda *_args, **_kwargs: "ok",
+            )
+        }
+        tools = agent.make_openai_tools(tools_dict)
+        props = tools[0]["function"]["parameters"]["properties"]
+        self.assertEqual(props["status"]["type"], "string")
+        self.assertEqual(props["status"]["enum"], ["done", "blocked", "incomplete"])
+
+
+class TestSystemPromptOverlay(unittest.TestCase):
+    """Prompt overlay selection should be task-aware and optional."""
+
+    def test_overlay_is_appended_when_cwd_matches_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt_path = os.path.join(tmp, "base.txt")
+            overlay_path = os.path.join(tmp, "react-overlay.txt")
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write("BASE\n{{TOOLS}}")
+            with open(overlay_path, "w", encoding="utf-8") as f:
+                f.write("REACT_OVERLAY")
+
+            agent_config = {
+                "prompt": prompt_path,
+                "prompt_overlays": {"react": overlay_path},
+            }
+            tool_defs = {"read": {"description": "Read file", "parameters": {"path": "string"}}}
+
+            with patch("os.getcwd", return_value="/tmp/benchmark/react"):
+                system_prompt = agent.load_system_prompt(agent_config, tool_defs, ["read"], {"read": "read"})
+
+            self.assertIn("BASE", system_prompt)
+            self.assertIn("REACT_OVERLAY", system_prompt)
+
+    def test_overlay_not_appended_when_no_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt_path = os.path.join(tmp, "base.txt")
+            overlay_path = os.path.join(tmp, "react-overlay.txt")
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write("BASE\n{{TOOLS}}")
+            with open(overlay_path, "w", encoding="utf-8") as f:
+                f.write("REACT_OVERLAY")
+
+            agent_config = {
+                "prompt": prompt_path,
+                "prompt_overlays": {"react": overlay_path},
+            }
+            tool_defs = {"read": {"description": "Read file", "parameters": {"path": "string"}}}
+
+            with patch("os.getcwd", return_value="/tmp/benchmark/rest-api"):
+                system_prompt = agent.load_system_prompt(agent_config, tool_defs, ["read"], {"read": "read"})
+
+            self.assertIn("BASE", system_prompt)
+            self.assertNotIn("REACT_OVERLAY", system_prompt)
+
 
 class TestThinkingCarryover(unittest.TestCase):
-    """Test thinking capture and native thinking."""
+    """Thinking-related config is enabled for native-thinking models."""
 
-    def test_return_thinking_enabled_when_think_true(self):
+    def test_think_keys_are_respected(self):
         settings = agent.build_agent_settings({
             "think": True,
             "native_thinking": False,
         })
+        self.assertTrue(settings["request_overrides"].get("think"))
         self.assertTrue(settings["request_overrides"].get("return_thinking"))
+        self.assertNotIn("think", settings["deprecated_ignored_keys"])
+        self.assertNotIn("native_thinking", settings["deprecated_ignored_keys"])
+
+    def test_think_level_maps_to_reasoning_effort(self):
+        settings = agent.build_agent_settings({
+            "think_level": "high",
+        })
+        self.assertEqual(settings["request_overrides"].get("reasoning_effort"), "high")
+
+    def test_thinking_level_alias_maps_to_reasoning_effort(self):
+        settings = agent.build_agent_settings({
+            "thinking_level": "medium",
+        })
+        self.assertEqual(settings["request_overrides"].get("reasoning_effort"), "medium")
 
     def test_native_thinking_preserved_in_history(self):
-        """Test that native thinking is preserved in assistant messages."""
+        """Assistant reasoning fields are copied into history when enabled."""
         responses = [
             {
                 "choices": [{
@@ -801,16 +992,40 @@ class TestThinkingCarryover(unittest.TestCase):
             for msg in second_messages
         ))
 
-    def test_thinking_visibility_hidden(self):
+    def test_thinking_visibility_key_is_respected(self):
         settings = agent.build_agent_settings({
             "thinking_visibility": "hidden",
             "native_thinking": True,
         })
         self.assertEqual(settings["thinking_visibility"], "hidden")
+        self.assertNotIn("thinking_visibility", settings["deprecated_ignored_keys"])
 
     def test_thinking_visibility_default_show(self):
         settings = agent.build_agent_settings({})
         self.assertEqual(settings["thinking_visibility"], "show")
+
+
+class TestAgentSettings(unittest.TestCase):
+    """Test agent settings parsing."""
+
+    def test_send_tool_categories_config(self):
+        settings = agent.build_agent_settings({"send_tool_categories": False})
+        self.assertFalse(settings["send_tool_categories"])
+
+    def test_send_tool_categories_env_override(self):
+        with patch.dict(os.environ, {"LOCALCODE_SEND_TOOL_CATEGORIES": "0"}, clear=False):
+            settings = agent.build_agent_settings({"send_tool_categories": True})
+        self.assertFalse(settings["send_tool_categories"])
+
+    def test_read_loop_nudge_threshold_and_finish_nudge_are_loaded(self):
+        settings = agent.build_agent_settings({
+            "read_loop_nudge_threshold": 5,
+            "finish_nudge_remaining_turns": 6,
+        })
+        self.assertNotIn("read_loop_nudge_threshold", settings)
+        self.assertNotIn("finish_nudge_remaining_turns", settings)
+        self.assertIn("read_loop_nudge_threshold", settings["deprecated_ignored_keys"])
+        self.assertIn("finish_nudge_remaining_turns", settings["deprecated_ignored_keys"])
 
 
 class TestToolChoiceRequired(unittest.TestCase):
@@ -871,7 +1086,7 @@ class TestToolChoiceRequired(unittest.TestCase):
 
 
 class TestHistoryToolCallTruncation(unittest.TestCase):
-    """Test compaction of historical assistant tool-call arguments."""
+    """History keeps full tool-call payloads in the retained message window."""
 
     def _run_with_history_settings(self, truncate_chars: int, keep_last: int):
         huge_content = "x" * 5000
@@ -931,8 +1146,8 @@ class TestHistoryToolCallTruncation(unittest.TestCase):
         args_json = self._run_with_history_settings(truncate_chars=120, keep_last=0)
         parsed = json.loads(args_json)
         self.assertEqual(parsed.get("path"), "react.js")
-        self.assertIn("[truncated", parsed.get("content", ""))
-        self.assertLess(len(args_json), 600)
+        self.assertEqual(len(parsed.get("content", "")), 5000)
+        self.assertGreater(len(args_json), 4500)
 
     def test_keeps_recent_assistant_tool_call_arguments(self):
         args_json = self._run_with_history_settings(truncate_chars=120, keep_last=1)
@@ -1340,6 +1555,42 @@ class TestResolveToolDisplayMap(unittest.TestCase):
         self.assertIn("silent tool swap", str(ctx.exception))
 
 
+class TestBuildToolCategoryMap(unittest.TestCase):
+    """Tool category map should be scoped to active tools for the current agent."""
+
+    def test_scopes_to_active_tools_and_aliases(self):
+        tool_defs = {
+            "read": {"category": "read", "aliases": ["read_file", "open_file"]},
+            "finish": {"category": "control", "aliases": ["done"]},
+            "shell": {"category": "write", "aliases": ["run"]},
+        }
+        active_tools = ["read", "finish"]
+        display_map = {"read": "read_file", "finish": "done"}
+
+        category_map = agent.build_tool_category_map(tool_defs, active_tools, display_map)
+
+        self.assertEqual(category_map["read"], "read")
+        self.assertEqual(category_map["read_file"], "read")
+        self.assertEqual(category_map["open_file"], "read")
+        self.assertEqual(category_map["finish"], "control")
+        self.assertEqual(category_map["done"], "control")
+        self.assertNotIn("shell", category_map)
+        self.assertNotIn("run", category_map)
+
+    def test_without_active_tools_includes_all(self):
+        tool_defs = {
+            "read": {"category": "read", "aliases": ["read_file"]},
+            "shell": {"category": "write", "aliases": ["run"]},
+        }
+
+        category_map = agent.build_tool_category_map(tool_defs)
+
+        self.assertEqual(category_map["read"], "read")
+        self.assertEqual(category_map["read_file"], "read")
+        self.assertEqual(category_map["shell"], "write")
+        self.assertEqual(category_map["run"], "write")
+
+
 class TestAnalysisOnlyRetry(unittest.TestCase):
     """Test that analysis-only responses trigger format retry."""
 
@@ -1398,9 +1649,9 @@ class TestAnalysisOnlyRetry(unittest.TestCase):
 
 
 class TestProgressInjection(unittest.TestCase):
-    """Test optional per-turn progress injection."""
+    """Progress state should not be injected into conversation history."""
 
-    def test_progress_message_injected_after_tool_result(self):
+    def test_progress_message_not_injected_after_tool_result(self):
         responses = [
             {
                 "choices": [{
@@ -1460,9 +1711,140 @@ class TestProgressInjection(unittest.TestCase):
             if msg.get("role") == "user"
             and "STATE (informational):" in (msg.get("content") or "")
         ]
-        self.assertTrue(injected, "Expected at least one injected progress message")
-        self.assertIn("read=[", injected[0]["content"])
-        self.assertIn("next=[", injected[0]["content"])
+        self.assertFalse(injected, "Did not expect state injection into user-visible history")
+
+    def test_progress_not_injected_on_think_turn(self):
+        responses = [
+            {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "think",
+                                "arguments": json.dumps({"thought": "Plan next step"}),
+                            },
+                        }],
+                    }
+                }],
+                "usage": {},
+            },
+            {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {
+                                "name": "finish",
+                                "arguments": "{}",
+                            },
+                        }],
+                    }
+                }],
+                "usage": {},
+            },
+        ]
+
+        def fake_call_api(messages, system_prompt, tools_dict, request_overrides=None):
+            return responses.pop(0)
+
+        tools_dict = {
+            "plan_solution": ("plan_solution", {"prompt": "string"}, lambda _args: "ok: planned"),
+            "finish": ("finish", {}, agent.finish_run),
+        }
+        agent_settings = {
+            "request_overrides": {},
+            "min_tool_calls": 0,
+            "max_format_retries": 0,
+            "progress_injection": True,
+            "progress_max_tokens": 48,
+        }
+
+        with patch("localcode.localcode.call_api", side_effect=fake_call_api):
+            content, messages = agent.run_agent("prompt", "system", tools_dict, agent_settings)
+
+        self.assertEqual(content, "done")
+        injected = [
+            msg for msg in messages
+            if msg.get("role") == "user"
+            and "STATE (informational):" in (msg.get("content") or "")
+        ]
+        self.assertFalse(injected, "Did not expect progress injection for reasoning-only turn")
+
+
+class TestUnknownToolEscalation(unittest.TestCase):
+    """Unknown tool feedback should escalate after repeated attempts."""
+
+    def test_unknown_tool_feedback_escalates_on_second_attempt(self):
+        responses = [
+            {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run", "arguments": "{}"},
+                        }],
+                    }
+                }],
+                "usage": {},
+            },
+            {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "run", "arguments": "{}"},
+                        }],
+                    }
+                }],
+                "usage": {},
+            },
+            {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_3",
+                            "type": "function",
+                            "function": {"name": "finish", "arguments": "{}"},
+                        }],
+                    }
+                }],
+                "usage": {},
+            },
+        ]
+
+        def fake_call_api(messages, system_prompt, tools_dict, request_overrides=None):
+            return responses.pop(0)
+
+        tools_dict = {
+            "read": ("read", {"path": "string"}, lambda _args: "ok: read"),
+            "finish": ("finish", {}, agent.finish_run),
+        }
+        agent_settings = {
+            "request_overrides": {},
+            "min_tool_calls": 0,
+            "max_format_retries": 0,
+            "max_turns": 8,
+        }
+
+        with patch("localcode.localcode.call_api", side_effect=fake_call_api):
+            content, messages = agent.run_agent("prompt", "system", tools_dict, agent_settings)
+
+        self.assertEqual(content, "done")
+        self.assertTrue(any(
+            msg.get("role") == "user"
+            and "STRICT ACTION: you repeated an unknown tool name." in (msg.get("content") or "")
+            for msg in messages
+        ))
 
 
 class TestNoopDetection(unittest.TestCase):
@@ -1760,7 +2142,7 @@ class TestPerFilePatchHash(unittest.TestCase):
         # Should be blocked because file A's block is identical
         self.assertTrue(result2.startswith("error:"), f"Should block repeated file A block: {result2}")
         self.assertIn("repeated patch", result2)
-        self.assertIn(path_a, result2)
+        self.assertIn(os.path.basename(path_a), result2)
 
     def test_hash_stored_only_after_success(self):
         """If patch fails, hash should NOT be stored (allowing retry)."""
@@ -1829,7 +2211,7 @@ class TestPerFilePatchHash(unittest.TestCase):
         result2 = agent.apply_patch_fn({"patch": patch})
         self.assertTrue(result2.startswith("error:"), f"Should block repeated A: {result2}")
         self.assertIn("repeated patch", result2)
-        self.assertIn(path_a, result2)
+        self.assertIn(os.path.basename(path_a), result2)
 
     def test_move_to_transfers_hash_to_new_path(self):
         """Patch with Move to: stores hash under new path, not old."""
@@ -3163,6 +3545,7 @@ class TestSelfCall(unittest.TestCase):
         self.assertEqual(data["model"], "test-model")
         self.assertEqual(data["temperature"], 0.5)
         self.assertEqual(data["max_tokens"], 1000)
+        self.assertEqual(data["tool_choice"], "none")
         self.assertEqual(data["messages"][0]["content"], "system prompt")
         self.assertEqual(data["messages"][-1]["content"], "hello")
 
@@ -3203,6 +3586,15 @@ class TestSelfCall(unittest.TestCase):
         agent._self_call("my prompt", "sys", user_prefix="PREFIX: ")
         data = json.loads(mock_urlopen.call_args[0][0].data)
         self.assertEqual(data["messages"][-1]["content"], "PREFIX: my prompt")
+
+    @patch("localcode.model_calls.urllib.request.urlopen")
+    def test_self_call_tool_choice_override(self, mock_urlopen):
+        """tool_choice can be overridden for side-channel calls."""
+        mock_urlopen.return_value = self._mock_urlopen("ok")
+        _inner.MODEL = "test-model"
+        agent._self_call("my prompt", "sys", tool_choice="auto")
+        data = json.loads(mock_urlopen.call_args[0][0].data)
+        self.assertEqual(data["tool_choice"], "auto")
 
     @patch("localcode.model_calls.urllib.request.urlopen")
     def test_api_error(self, mock_urlopen):
@@ -3251,6 +3643,18 @@ class TestSubprocessCall(unittest.TestCase):
 class TestMakeModelCallHandler(unittest.TestCase):
     """Test make_model_call_handler factory."""
 
+    THINK_OK = (
+        "After each tool call, mentally track:\n"
+        "- [x] Read source file\n"
+        "- [x] Read test/spec file\n"
+        "- [x] Plan approach\n"
+        "- [ ] Write implementation\n"
+        "- [ ] Verify (re-read file)\n"
+        "- [ ] Finish\n"
+        "Current step: planning complete.\n"
+        "Next action: write react.js with the implementation."
+    )
+
     def test_returns_closure_with_name(self):
         """Returns callable with correct __name__."""
         config = {"mode": "self", "system_prompt_file": "prompts/think_default.txt"}
@@ -3293,13 +3697,151 @@ class TestMakeModelCallHandler(unittest.TestCase):
         self.assertEqual(call_kwargs["timeout"], 60)
         self.assertEqual(call_kwargs["include_history"], False)
         self.assertEqual(call_kwargs["user_prefix"], "TEST: ")
+        self.assertEqual(call_kwargs["include_tool_messages"], True)
+        self.assertEqual(call_kwargs["include_tool_call_summaries"], False)
+        self.assertEqual(call_kwargs["history_sanitize"], False)
+        self.assertEqual(call_kwargs["history_tool_result_chars"], 500)
+        self.assertEqual(call_kwargs["history_tool_call_args_chars"], 180)
+        self.assertEqual(call_kwargs["tool_choice"], "none")
+
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
+    def test_self_mode_uses_prompt_param(self, mock_load, mock_self_call):
+        """Self mode can source prompt text from a custom arg key."""
+        mock_load.return_value = "loaded prompt"
+        mock_self_call.return_value = "State summary: ready to edit react.js"
+        config = {
+            "mode": "self",
+            "system_prompt_file": "prompts/test.txt",
+            "prompt_param": "thought",
+        }
+        handler = agent.make_model_call_handler("think", config)
+        result = handler({"thought": "plan before write"})
+        self.assertIn("State summary:", result)
+        call_kwargs = mock_self_call.call_args[1]
+        self.assertEqual(call_kwargs["prompt"], "plan before write")
+
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
+    def test_self_mode_accepts_question_key_without_explicit_prompt_param(self, mock_load, mock_self_call):
+        """Default prompt-key picker accepts `question` for side-channel tools."""
+        mock_load.return_value = "loaded prompt"
+        mock_self_call.return_value = "analysis ok"
+        config = {
+            "mode": "self",
+            "system_prompt_file": "prompts/test.txt",
+        }
+        handler = agent.make_model_call_handler("plan_solution", config)
+        result = handler({"question": "Plan implementation steps"})
+        self.assertEqual(result, "analysis ok")
+        call_kwargs = mock_self_call.call_args[1]
+        self.assertEqual(call_kwargs["prompt"], "Plan implementation steps")
+
+    @patch("localcode.model_calls._log_sidechannel_event")
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
+    def test_self_mode_logs_sidechannel_request_and_response(self, mock_load, mock_self_call, mock_log):
+        """Self-mode model_call emits explicit side-channel request/response logs."""
+        mock_load.return_value = "loaded prompt"
+        mock_self_call.return_value = "analysis ok"
+        config = {
+            "mode": "self",
+            "system_prompt_file": "prompts/test.txt",
+        }
+        handler = agent.make_model_call_handler("plan_solution", config)
+        result = handler({"prompt": "Plan implementation steps"})
+        self.assertEqual(result, "analysis ok")
+        events = [call.args[0] for call in mock_log.call_args_list]
+        self.assertIn("model_call_sidechannel_request", events)
+        self.assertIn("model_call_sidechannel_response", events)
+
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
+    def test_self_mode_passes_history_sanitize_flags(self, mock_load, mock_self_call):
+        """Self mode forwards history sanitization config to _self_call."""
+        mock_load.return_value = "loaded prompt"
+        mock_self_call.return_value = self.THINK_OK
+        config = {
+            "mode": "self",
+            "system_prompt_file": "prompts/test.txt",
+            "prompt_param": "thought",
+            "include_tool_messages": False,
+            "include_tool_call_summaries": True,
+            "history_sanitize": True,
+            "history_tool_result_chars": 321,
+            "history_tool_call_args_chars": 123,
+        }
+        handler = agent.make_model_call_handler("think", config)
+        handler({"thought": "plan"})
+        self.assertEqual(mock_self_call.call_count, 1)
+        call_kwargs = mock_self_call.call_args[1]
+        self.assertEqual(call_kwargs["include_tool_messages"], False)
+        self.assertEqual(call_kwargs["include_tool_call_summaries"], True)
+        self.assertEqual(call_kwargs["history_sanitize"], True)
+        self.assertEqual(call_kwargs["history_tool_result_chars"], 321)
+        self.assertEqual(call_kwargs["history_tool_call_args_chars"], 123)
+
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
+    def test_think_returns_error_when_self_call_fails(self, mock_load, mock_self_call):
+        """Think returns side-channel error without retrying format normalization."""
+        mock_load.return_value = "loaded prompt"
+        mock_self_call.return_value = "error: API call failed: timeout"
+        config = {
+            "mode": "self",
+            "system_prompt_file": "prompts/test.txt",
+            "prompt_param": "thought",
+        }
+        handler = agent.make_model_call_handler("think", config)
+        result = handler({"thought": "analyze current progress"})
+        self.assertTrue(result.startswith("error:"), result)
+        self.assertIn("timeout", result)
+        self.assertEqual(mock_self_call.call_count, 1)
+
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
+    def test_think_result_is_truncated(self, mock_load, mock_self_call):
+        """Think output is truncated to avoid context bloat."""
+        mock_load.return_value = "loaded prompt"
+        mock_self_call.return_value = (
+            "State summary:\n"
+            "- Done: source and spec reviewed\n"
+            "- Open issues: callback ordering uncertain\n"
+            "Next action: " + ("A" * 1800)
+        )
+        config = {
+            "mode": "self",
+            "system_prompt_file": "prompts/test.txt",
+            "prompt_param": "thought",
+            "result_max_chars": 80,
+        }
+        handler = agent.make_model_call_handler("think", config)
+        result = handler({"thought": "short"})
+        self.assertLessEqual(len(result), 83)
+        self.assertTrue(result.endswith("..."))
+
+    @patch("localcode.model_calls._self_call")
+    @patch("localcode.model_calls._load_prompt_file")
+    def test_think_does_not_repair_or_validate_format(self, mock_load, mock_self_call):
+        """Think returns raw side-channel summary without repair retries."""
+        mock_load.return_value = "loaded prompt"
+        mock_self_call.return_value = "Tool calls: read({\"path\": \"react.js\"})"
+        config = {
+            "mode": "self",
+            "system_prompt_file": "prompts/test.txt",
+            "prompt_param": "thought",
+        }
+        handler = agent.make_model_call_handler("think", config)
+        result = handler({"thought": "plan"})
+        self.assertIn("Tool calls:", result)
+        self.assertEqual(mock_self_call.call_count, 1)
 
     @patch("localcode.model_calls._self_call")
     @patch("localcode.model_calls._load_prompt_file")
     def test_self_mode_stage_dispatch(self, mock_load, mock_self_call):
         """Stage param selects the correct stage prompt file."""
         mock_load.side_effect = lambda p, base_dir: f"content of {p}"
-        mock_self_call.return_value = "ok"
+        mock_self_call.return_value = self.THINK_OK
         config = {
             "mode": "self",
             "system_prompt_file": "prompts/default.txt",
@@ -3551,6 +4093,7 @@ class TestMakeModelCallHandlerSelfBatch(unittest.TestCase):
         self.assertEqual(call_kwargs[1]["timeout"], 60)
         self.assertEqual(call_kwargs[1]["include_history"], True)
         self.assertEqual(call_kwargs[1]["max_concurrent"], 2)
+        self.assertEqual(call_kwargs[1]["tool_choice"], "none")
         self.assertEqual(result, "batch result")
 
     @patch("localcode.model_calls._self_call_batch")
@@ -3605,6 +4148,53 @@ class TestCallApiRetries(unittest.TestCase):
         self.assertIn("request failed", result.get("error", ""))
         self.assertEqual(mock_urlopen.call_count, 1)
 
+    @patch("localcode.localcode.urllib.request.urlopen")
+    def test_includes_tool_categories_by_default(self, mock_urlopen):
+        payload = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.headers = {}
+        mock_urlopen.return_value = mock_response
+
+        with patch("localcode.localcode.MODEL", "test-model"), \
+             patch("localcode.localcode.API_URL", "http://example.com/v1/chat/completions"), \
+             patch("localcode.localcode.MAX_TOKENS", 256), \
+             patch("localcode.localcode.TOOL_CATEGORIES", {"read": "read"}), \
+             patch("localcode.localcode.AGENT_SETTINGS", {}):
+            _ = agent.call_api(
+                messages=[{"role": "user", "content": "ping"}],
+                system_prompt="system",
+                tools_dict={"read": ("read", {}, lambda *_args, **_kwargs: "ok")},
+            )
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        self.assertIn("tool_categories", body)
+        self.assertEqual(body["tool_categories"], {"read": "read"})
+
+    @patch("localcode.localcode.urllib.request.urlopen")
+    def test_omits_tool_categories_when_disabled(self, mock_urlopen):
+        payload = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.headers = {}
+        mock_urlopen.return_value = mock_response
+
+        with patch("localcode.localcode.MODEL", "test-model"), \
+             patch("localcode.localcode.API_URL", "http://example.com/v1/chat/completions"), \
+             patch("localcode.localcode.MAX_TOKENS", 256), \
+             patch("localcode.localcode.TOOL_CATEGORIES", {"read": "read"}), \
+             patch("localcode.localcode.AGENT_SETTINGS", {"send_tool_categories": False}):
+            _ = agent.call_api(
+                messages=[{"role": "user", "content": "ping"}],
+                system_prompt="system",
+                tools_dict={"read": ("read", {}, lambda *_args, **_kwargs: "ok")},
+            )
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        self.assertNotIn("tool_categories", body)
+
     @patch("localcode.localcode.time.perf_counter", side_effect=[10.0, 12.0])
     @patch("localcode.localcode.urllib.request.urlopen")
     def test_estimates_tps_when_server_timings_missing(self, mock_urlopen, _mock_perf_counter):
@@ -3632,9 +4222,10 @@ class TestCallApiRetries(unittest.TestCase):
 
         self.assertIn("timings", result)
         self.assertTrue(result["timings"].get("estimated"))
-        self.assertAlmostEqual(result["timings"].get("prompt_per_second"), 5.0, places=2)
-        self.assertAlmostEqual(result["timings"].get("predicted_per_second"), 2.0, places=2)
+        # Estimated timings only contain total throughput (not fake per-phase split)
         self.assertAlmostEqual(result["timings"].get("total_per_second"), 7.0, places=2)
+        self.assertNotIn("prompt_per_second", result["timings"])
+        self.assertNotIn("predicted_per_second", result["timings"])
 
     @patch("localcode.localcode.time.sleep")
     @patch("localcode.localcode.time.perf_counter", side_effect=[100.0, 200.0, 202.0])
@@ -3668,18 +4259,114 @@ class TestCallApiRetries(unittest.TestCase):
         self.assertIn("timings", result)
         self.assertTrue(result["timings"].get("estimated"))
         self.assertAlmostEqual(result["timings"].get("elapsed_seconds"), 2.0, places=3)
-        self.assertAlmostEqual(result["timings"].get("prompt_per_second"), 5.0, places=2)
-        self.assertAlmostEqual(result["timings"].get("predicted_per_second"), 2.0, places=2)
+        self.assertAlmostEqual(result["timings"].get("total_per_second"), 7.0, places=2)
 
-    def test_format_usage_marks_estimated_tps(self):
+    def test_format_usage_estimated_shows_total_only(self):
         info = agent.format_usage_info(
             {"prompt_tokens": 10, "completion_tokens": 4},
             {
-                "prompt_per_second": 5.0,
-                "predicted_per_second": 2.0,
                 "total_per_second": 7.0,
+                "elapsed_seconds": 2.0,
                 "estimated": True,
             },
         )
-        self.assertIn("prefill ~5 t/s", info)
-        self.assertIn("decode ~2.0 t/s", info)
+        self.assertIn("~7 tok/s total", info)
+        self.assertIn("2.0s", info)
+        self.assertNotIn("prefill", info)
+        self.assertNotIn("decode", info)
+
+    def test_format_usage_real_timings_show_prefill_decode(self):
+        info = agent.format_usage_info(
+            {"prompt_tokens": 10, "completion_tokens": 4},
+            {
+                "prompt_per_second": 500.0,
+                "predicted_per_second": 40.0,
+                "total_per_second": 540.0,
+            },
+        )
+        self.assertIn("prefill 500 t/s", info)
+        self.assertIn("decode 40.0 t/s", info)
+
+    @patch("localcode.localcode.time.perf_counter", side_effect=[10.0, 12.0])
+    @patch("localcode.localcode.urllib.request.urlopen")
+    def test_mlx_real_tps_from_usage(self, mock_urlopen, _mock_perf_counter):
+        """When mlx-lm server returns prompt_tps/generation_tps in usage, use them as real timings."""
+        payload = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {
+                "prompt_tokens": 3000,
+                "completion_tokens": 100,
+                "total_tokens": 3100,
+                "prompt_tps": 1200.5,
+                "generation_tps": 42.3,
+            },
+        }
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.headers = {}
+        mock_urlopen.return_value = mock_response
+
+        with patch("localcode.localcode.MODEL", "test-model"), \
+             patch("localcode.localcode.API_URL", "http://example.com/v1/chat/completions"), \
+             patch("localcode.localcode.MAX_TOKENS", 256):
+            result = agent.call_api(
+                messages=[{"role": "user", "content": "ping"}],
+                system_prompt="system",
+                tools_dict={},
+            )
+
+        self.assertIn("timings", result)
+        # Should NOT be estimated — these are real values from mlx generate
+        self.assertFalse(result["timings"].get("estimated", False))
+        self.assertAlmostEqual(result["timings"]["prompt_per_second"], 1200.5, places=1)
+        self.assertAlmostEqual(result["timings"]["predicted_per_second"], 42.3, places=1)
+
+    def test_format_usage_mlx_real_tps(self):
+        """Real TPS from mlx-lm should display as prefill/decode without ~ mark."""
+        info = agent.format_usage_info(
+            {"prompt_tokens": 3000, "completion_tokens": 100},
+            {
+                "prompt_per_second": 1200.5,
+                "predicted_per_second": 42.3,
+                "total_per_second": 1550.0,
+                "elapsed_seconds": 2.0,
+            },
+        )
+        self.assertIn("prefill 1200 t/s", info)
+        self.assertIn("decode 42.3 t/s", info)
+        self.assertNotIn("~", info)
+
+    @patch("localcode.localcode.urllib.request.urlopen")
+    def test_restores_tools_when_api_request_hook_drops_them(self, mock_urlopen):
+        payload = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_response.headers = {}
+        mock_urlopen.return_value = mock_response
+
+        def drop_tools(data):
+            req = dict(data.get("request_data", {}))
+            req.pop("tools", None)
+            data["request_data"] = req
+            return data
+
+        _hooks.clear()
+        _hooks.register("api_request", drop_tools)
+        try:
+            with patch("localcode.localcode.MODEL", "test-model"), \
+                 patch("localcode.localcode.API_URL", "http://example.com/v1/chat/completions"), \
+                 patch("localcode.localcode.MAX_TOKENS", 256):
+                _ = agent.call_api(
+                    messages=[{"role": "user", "content": "ping"}],
+                    system_prompt="system",
+                    tools_dict={"read": ("read", {"path": "string"}, lambda *_args, **_kwargs: "ok")},
+                )
+        finally:
+            _hooks.clear()
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        self.assertIsInstance(body.get("tools"), list)
+        self.assertGreater(len(body["tools"]), 0)
+        self.assertIsInstance(agent.LAST_REQUEST_SNAPSHOT.get("tools"), list)
+        self.assertGreater(len(agent.LAST_REQUEST_SNAPSHOT["tools"]), 0)

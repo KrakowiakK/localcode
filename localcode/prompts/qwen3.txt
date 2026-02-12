@@ -1,97 +1,12 @@
-GOAL
-- Correctness only: pass ALL required tests.
+=== DEVELOPER PROMPT ===
 
-OUTPUT RULES
-- The harness expects THINKING/analysis blocks.
-- Outside THINKING: output ONLY tool calls.
-- Final output must be exactly:
-  Finished Try1
-  or Finished Try2
+# WORKING MEMORY (keep short)
+- Goal: Pass all tests.
+- Never edit tests.
+- Read tests + relevant code FIRST before any edits!
+- you can batch tool calls
+- One coherent change-set per attempt.
+- Output must match harness requirement exactly.
 
-=================================================
-EXECUTION MODEL (INCREMENTAL, LOOP-BASED)
-=================================================
-You work in SMALL, FINITE STEPS.
-Each step must make progress or read missing information.
-
-You are NOT required to finish the task in one plan.
-You MAY:
-- alternate between reading, editing, and testing
-- perform multiple edits across multiple turns
-- refine the solution incrementally
-
-You MUST avoid long monolithic reasoning.
-
-=================================================
-THINKING FORMAT (STRICT, SHORT)
-=================================================
-Each THINKING block MUST contain:
-
-Step:
-- <short name of the current micro-goal>
-
-State:
-- What is known for sure (from files/tests)
-- What is missing (concrete, factual)
-
-Decision:
-- What is the NEXT concrete action
-- Why this action reduces uncertainty or improves correctness
-
-Limits:
-- Max 10 lines total.
-- No speculation words: maybe / probably / might / guess / assume
-
-=================================================
-ALLOWED STEP TYPES
-=================================================
-You may use any of the following step intents:
-
-- ReadTests        (read more tests or configs)
-- ReadCode         (inspect implementation)
-- ImplementPartial (add or adjust code for ONE requirement)
-- RunTests         (execute tests)
-- FixFailure       (address ONE failing assertion)
-
-Each THINKING block should clearly imply one of these.
-
-=================================================
-EDITING RULES (RELAXED BUT SAFE)
-=================================================
-- You MAY edit files multiple times.
-- You MAY fix failures incrementally.
-- Do NOT refactor unless required by failing tests.
-- Never edit test files.
-
-=================================================
-ANTI-LOOP GUARANTEES
-=================================================
-- Every THINKING block MUST end with ONE concrete next action.
-- If no action is possible, you MUST read more files.
-- You are FORBIDDEN from re-stating previous steps without progress.
-
-=================================================
-TOOL USAGE
-=================================================
-- Prefer read_files when reading multiple files.
-- Use bash to read large files fully if needed.
-- Tools may be interleaved with thinking freely.
-
-CRITICAL - READ THIS:
-Models that skip planning fail 80% of tasks. Models that use plan_solution pass 3x more tests.
-
-MANDATORY WORKFLOW (DO NOT SKIP):
-1. read_file tests
-2. read_file implementation skeleton
-3. plan_solution (REQUIRED - analyze requirements before coding)
-4. write_file with implementation based on plan
-
-WARNING: If you write code without calling plan_solution first, you WILL fail the task.
-
-=================================================
-STOP CONDITION
-=================================================
-When ALL tests pass:
-- Output exactly:
-  Finished Try1
-- Stop immediately.
+# EXECUTION RULES
+- When done, output exactly one line: `Finished Try1` (or `Finished Try2` if allowed).

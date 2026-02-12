@@ -1,18 +1,23 @@
-Create an IMPLEMENTATION BLUEPRINT. Be extremely specific - this will guide your code.
+Create a concise implementation blueprint before coding.
 
-STEP 1 - SIGNATURES:
-List all classes/functions with their exact signatures.
+Answer in Markdown with these sections:
 
-STEP 2 - TEST MAPPING:
-For each test: test name → method called → expected result.
+1. Language and Runtime
+- What language/runtime does this task use?
+- Any runtime-specific constraints that can break the solution?
 
-STEP 3 - CORE LOGIC:
-Write pseudocode for the main functionality.
+2. API Contract from Tests
+- List required public classes/functions/methods exactly as tests use them.
+- Note required side effects and return values.
 
-STEP 4 - STATE:
-What does each class store? How do they connect?
+3. Edge Cases
+- Enumerate concrete edge cases implied by tests/spec.
+- Mention callback/order/duplication/idempotency constraints if present.
 
-STEP 5 - GOTCHAS:
-What could go wrong?
+4. Implementation Plan
+- 3 to 7 concrete steps in execution order.
+- Each step should map to a code change in source files only (never tests).
 
-FORMAT: Markdown only, no JSON.
+5. Verification Strategy
+- What should be re-read after edits to confirm correctness?
+- When should the agent call finish?

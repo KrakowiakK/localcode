@@ -18,7 +18,24 @@ from localcode.tool_handlers._state import (
     MAX_SINGLE_FILE_SCAN,
     _require_args_dict,
 )
-from localcode.tool_handlers._path import _is_ignored_path, _validate_path
+from localcode.tool_handlers._path import _is_ignored_path, _validate_path, to_display_path
+
+
+_HIT_RE = re.compile(r"^(.*?):([0-9]+):(.*)$")
+
+
+def _extract_hit_path(line: str) -> str:
+    match = _HIT_RE.match(line)
+    if match:
+        return match.group(1)
+    return line.split(":", 1)[0]
+
+
+def _render_hit_line(line: str) -> str:
+    match = _HIT_RE.match(line)
+    if not match:
+        return line
+    return f"{to_display_path(match.group(1))}:{match.group(2)}:{match.group(3)}"
 
 
 def _tool_hints_enabled() -> bool:
@@ -38,9 +55,10 @@ def glob_fn(args: Any) -> str:
         path = _validate_path(path, check_exists=True)
     except ValueError as e:
         return f"error: {e}"
+    display_path = to_display_path(path)
 
     if not os.path.isdir(path):
-        return f"error: path does not exist: {path}"
+        return f"error: path does not exist: {display_path}"
 
     def _safe_mtime(fp: str) -> float:
         try:
@@ -62,11 +80,12 @@ def glob_fn(args: Any) -> str:
             files = files[:MAX_GLOB_RESULTS]
             if not files:
                 return "no files found"
-            out = "\n".join(files)
+            display_files = [to_display_path(f) for f in files]
+            out = "\n".join(display_files)
             if truncated:
                 out += "\n\n(results are truncated; refine path or pattern)"
             if _tool_hints_enabled():
-                out += _glob_next_step_hint(files)
+                out += _glob_next_step_hint(display_files)
             return out
 
     pattern = os.path.join(path, str(pat))
@@ -80,11 +99,12 @@ def glob_fn(args: Any) -> str:
     files = files[:MAX_GLOB_RESULTS]
     if not files:
         return "no files found"
-    out = "\n".join(files)
+    display_files = [to_display_path(f) for f in files]
+    out = "\n".join(display_files)
     if truncated:
         out += "\n\n(results are truncated; refine path or pattern)"
     if _tool_hints_enabled():
-        out += _glob_next_step_hint(files)
+        out += _glob_next_step_hint(display_files)
     return out
 
 
@@ -117,9 +137,10 @@ def grep_fn(args: Any) -> str:
             path = os.path.abspath(path)
     except ValueError as e:
         return f"error: {e}"
+    display_path = to_display_path(path)
 
     if not os.path.exists(path):
-        return f"error: path does not exist: {path}"
+        return f"error: path does not exist: {display_path}"
 
     if shutil.which("rg"):
         cmd = ["rg", "--line-number", "--no-heading", "--color", "never"]
@@ -131,7 +152,8 @@ def grep_fn(args: Any) -> str:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode in (0, 1):
             lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
-            lines = [ln for ln in lines if not _is_ignored_path(ln.split(":", 1)[0])]
+            lines = [ln for ln in lines if not _is_ignored_path(_extract_hit_path(ln))]
+            lines = [_render_hit_line(ln) for ln in lines]
             truncated = len(lines) > MAX_GREP_RESULTS
             lines = lines[:MAX_GREP_RESULTS]
             if not lines:
@@ -178,7 +200,7 @@ def grep_fn(args: Any) -> str:
             with open(fp, "r", errors="ignore") as f:
                 for ln_no, ln in enumerate(f, 1):
                     if rx.search(ln):
-                        hits.append(f"{fp}:{ln_no}:{ln.rstrip()}")
+                        hits.append(f"{to_display_path(fp)}:{ln_no}:{ln.rstrip()}")
                         if len(hits) >= MAX_GREP_RESULTS:
                             break
         except Exception:
@@ -231,9 +253,10 @@ def search_fn(args: Any) -> str:
             path = os.path.abspath(path)
     except ValueError as e:
         return f"error: {e}"
+    display_path = to_display_path(path)
 
     if not os.path.exists(path):
-        return f"error: path does not exist: {path}"
+        return f"error: path does not exist: {display_path}"
 
     if shutil.which("rg"):
         cmd = ["rg", "--line-number", "--no-heading", "--color", "never"]
@@ -245,7 +268,8 @@ def search_fn(args: Any) -> str:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode in (0, 1):
             lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
-            lines = [ln for ln in lines if not _is_ignored_path(ln.split(":", 1)[0])]
+            lines = [ln for ln in lines if not _is_ignored_path(_extract_hit_path(ln))]
+            lines = [_render_hit_line(ln) for ln in lines]
             truncated = len(lines) > max_results_int
             lines = lines[:max_results_int]
             if not lines:
@@ -292,7 +316,7 @@ def search_fn(args: Any) -> str:
             with open(fp, "r", errors="ignore") as f:
                 for ln_no, ln in enumerate(f, 1):
                     if rx.search(ln):
-                        hits.append(f"{fp}:{ln_no}:{ln.rstrip()}")
+                        hits.append(f"{to_display_path(fp)}:{ln_no}:{ln.rstrip()}")
                         if len(hits) >= max_results_int:
                             break
         except Exception:
@@ -318,14 +342,21 @@ def ls_fn(args: Any) -> str:
         return err
     path = args.get("path", ".") or "."
     try:
-        # ls on dirs inside sandbox; if sandbox off, allow.
         if _state.SANDBOX_ROOT:
             path = _validate_path(path, check_exists=True)
         else:
             path = os.path.abspath(path)
-        if not os.path.isdir(path):
-            return f"error: directory not found: {path}"
-        entries = sorted(os.listdir(path))
-        return "\n".join(entries) if entries else "(empty directory)"
-    except Exception as e:
+    except ValueError as e:
         return f"error: {e}"
+
+    display_path = to_display_path(path)
+    if not os.path.isdir(path):
+        return f"error: directory not found: {display_path}"
+
+    try:
+        entries = sorted(os.listdir(path))
+    except PermissionError:
+        return f"error: permission denied: {display_path}"
+    except OSError:
+        return f"error: cannot list directory: {display_path}"
+    return "\n".join(entries) if entries else "(empty directory)"

@@ -1,0 +1,42 @@
+{
+  "name": "gguf/kimi-k2.5",
+  "description": "Kimi K2.5 1T MoE (32B active, 384 experts/8 active + 1 shared) via llama.cpp (GGUF) - UD-Q2_K_XL - native thinking + tool calling.",
+  "prompt": "prompts/minimax.txt",
+  "model": "kimi-k2.5",
+  "url": "http://localhost:1235/v1/chat/completions",
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 0,
+  "min_p": 0.01,
+  "max_tokens": 16000,
+  "tool_choice": "auto",
+  "cache": true,
+  "tool_name_style": "canonical",
+  "auto_tool_call_on_failure": true,
+  "require_code_change": true,
+  "min_tool_calls": 1,
+  "max_format_retries": 2,
+  "max_batch_tool_calls": 2,
+  "tools": [
+    "list_dir",
+    "read_file",
+    "write_file",
+    "replace_in_file",
+    "patch_files",
+    "find_files",
+    "search_text"
+  ],
+  "server_config": {
+    "model_path": "~/.lmstudio/models/unsloth/Kimi-K2.5-GGUF/Kimi-K2.5-UD-Q2_K_XL-00001-of-00008.gguf",
+    "context_window": 32768,
+    "extra_args": [
+      "--jinja",
+      "--no-context-shift",
+      "--special",
+      "-fa", "on",
+      "--reasoning-format", "none",
+      "--parallel", "1"
+    ],
+    "hf_model": "hf://unsloth/Kimi-K2.5-GGUF/Kimi-K2.5-UD-Q2_K_XL-00001-of-00008.gguf"
+  }
+}

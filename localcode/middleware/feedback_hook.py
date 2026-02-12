@@ -10,6 +10,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from localcode import hooks
+from localcode.tool_handlers._path import to_display_path
 
 # Module state set by install()
 _tools_dict = None
@@ -194,8 +195,8 @@ def _bft(resolved_name: str, reason: str, fallback: str, values: Optional[Dict[s
 def _get_target(data: Dict[str, Any], action: str) -> str:
     """Get target path description from event data."""
     path_value = data.get("path_value")
-    if path_value:
-        return f"the SAME path you attempted to {action}: {path_value}"
+    if isinstance(path_value, str) and path_value:
+        return f"the SAME path you attempted to {action}: {to_display_path(path_value)}"
     if data.get("tool_name") == "apply_patch":
         return "the file named in the patch header line: '*** Update File: <path>'"
     return f"the SAME path you attempted to {action} (use the 'path' argument from your tool call)"
@@ -217,6 +218,8 @@ def _build_patch_context_not_found(data: Dict[str, Any]) -> str:
     fail_count = data.get("patch_fail_count", 0)
     if fail_count >= 2:
         path_value = data.get("path_value", "?")
+        if isinstance(path_value, str):
+            path_value = to_display_path(path_value)
         text += (
             f"\nSECOND FAILURE on same file ({path_value}): "
             f"STOP patching; re-read and switch to {edit_tool} or {write_tool}."
@@ -359,8 +362,9 @@ def _build_write_noop(data: Dict[str, Any]) -> str:
     edit_tool = _dn("edit")
     return _bft(data.get("tool_name", "write"), "write_noop", (
         f"FORMAT ERROR: {write_tool} wrote identical content (no-op).\n"
-        f"ACTION: {read_tool}(path) (optionally diff=true), then {write_tool} with DIFFERENT content, "
-        f"or use {edit_tool} for a targeted change. If already correct, call finish."
+        f"ACTION: use {edit_tool} or a DIFFERENT {write_tool} payload, "
+        "or call finish if implementation is already correct.\n"
+        f"If context is stale/unknown, use {read_tool}(path) before next edit."
     ))
 
 
@@ -369,13 +373,13 @@ def _build_write_repeated_noop(data: Dict[str, Any]) -> str:
     read_tool = _dn("read")
     edit_tool = _dn("edit")
     path_value = data.get("path_value")
-    target = path_value if isinstance(path_value, str) and path_value else "the same file path"
+    target = to_display_path(path_value) if isinstance(path_value, str) and path_value else "the same file path"
     return _bft(data.get("tool_name", "write"), "write_repeated_noop", (
         f"LOOP GUARD: repeated no-op {write_tool} calls detected.\n"
         "ACTION:\n"
-        f"1. Call {read_tool} on {target} (use diff=true if available).\n"
-        f"2. Change strategy: use {edit_tool} or substantially different {write_tool} content.\n"
-        "3. If implementation is already correct, call finish.\n"
+        f"1. Change strategy now: use {edit_tool} or substantially different {write_tool} content.\n"
+        "2. If implementation is already correct, call finish.\n"
+        f"3. Use {read_tool} on {target} only if context is missing or stale.\n"
         "Do NOT repeat the same write again."
     ))
 

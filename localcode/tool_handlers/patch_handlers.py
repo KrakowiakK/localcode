@@ -4,18 +4,72 @@ Patch tool handler: apply_patch_fn() and all patch helpers.
 
 import os
 import sys
+import hashlib
+import difflib
 from typing import Any, Dict, List, Optional, Tuple
 
 from localcode.tool_handlers._state import (
     FILE_VERSIONS,
     _LAST_PATCH_HASH,
     _NOOP_COUNTS,
+    _mutation_brief_line,
+    _mutation_decision_hint,
+    _mutation_state_line,
+    _record_mutation,
     _read_file_bytes,
     _require_args_dict,
     _sha256,
+    _short_sha_text,
     _track_file_version,
 )
-from localcode.tool_handlers._path import _should_block_test_edit, _validate_path
+from localcode.tool_handlers._path import _should_block_test_edit, _validate_path, to_display_path
+
+
+def _changed_lines_est(previous: str, current: str) -> int:
+    prev_lines = previous.splitlines()
+    curr_lines = current.splitlines()
+    matcher = difflib.SequenceMatcher(a=prev_lines, b=curr_lines, autojunk=False)
+    changed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "replace":
+            changed += max(i2 - i1, j2 - j1)
+        elif tag == "delete":
+            changed += i2 - i1
+        elif tag == "insert":
+            changed += j2 - j1
+    return changed
+
+
+def _changed_line_preview(previous: str, current: str, max_lines: int = 4) -> str:
+    prev_lines = previous.splitlines()
+    curr_lines = current.splitlines()
+    matcher = difflib.SequenceMatcher(a=prev_lines, b=curr_lines, autojunk=False)
+    changed_indexes: List[int] = []
+    seen = set()
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if j1 < j2:
+            for idx in range(j1, min(j2, j1 + max_lines)):
+                if idx not in seen:
+                    seen.add(idx)
+                    changed_indexes.append(idx)
+                if len(changed_indexes) >= max_lines:
+                    break
+        elif curr_lines:
+            idx = min(max(j1 - 1, 0), len(curr_lines) - 1)
+            if idx not in seen:
+                seen.add(idx)
+                changed_indexes.append(idx)
+        if len(changed_indexes) >= max_lines:
+            break
+    if not changed_indexes:
+        return "(no changed lines captured)"
+    out: List[str] = []
+    for idx in changed_indexes[:max_lines]:
+        text = curr_lines[idx] if 0 <= idx < len(curr_lines) else ""
+        out.append(f"{idx + 1:4}| {text}")
+    return "\n".join(out)
 
 
 def _normalize_indent(line: str) -> str:
@@ -131,7 +185,7 @@ def _apply_hunks(text_lines: List[str], hunks: List[List[str]], file_path: str =
 
 def _apply_update_patch(path: str, change_lines: List[str], move_to: Optional[str] = None) -> None:
     if not os.path.exists(path):
-        raise ValueError(f"file not found: {path}")
+        raise ValueError(f"file not found: {to_display_path(path)}")
     with open(path, "r", encoding="utf-8") as f:
         text = f.read()
     had_trailing_newline = text.endswith("\n") or text.endswith("\r")
@@ -152,7 +206,7 @@ def _apply_update_patch(path: str, change_lines: List[str], move_to: Optional[st
 
 def _apply_add_patch(path: str, change_lines: List[str]) -> None:
     if os.path.exists(path):
-        raise ValueError(f"file already exists: {path}")
+        raise ValueError(f"file already exists: {to_display_path(path)}")
     content: List[str] = []
     for line in change_lines:
         if line.startswith("*** End of File"):
@@ -170,7 +224,7 @@ def _apply_add_patch(path: str, change_lines: List[str]) -> None:
 
 def _apply_delete_patch(path: str) -> None:
     if not os.path.exists(path):
-        raise ValueError(f"file not found: {path}")
+        raise ValueError(f"file not found: {to_display_path(path)}")
     os.remove(path)
 
 
@@ -200,7 +254,7 @@ def apply_patch_fn(args: Any) -> str:
             elif line.startswith("*** Move to: "):
                 raw_path = line[len("*** Move to: "):].strip()
             if raw_path and _should_block_test_edit(raw_path):
-                return f"error: test file edits are blocked in benchmark mode ({raw_path})"
+                return f"error: test file edits are blocked in benchmark mode ({to_display_path(raw_path)})"
 
         # Repeat detection: per-file block hashing
         # Split patch into per-file blocks and hash each separately
@@ -237,13 +291,16 @@ def apply_patch_fn(args: Any) -> str:
         for vpath, file_hash in patch_file_hashes.items():
             if _LAST_PATCH_HASH.get(vpath) == file_hash:
                 return (
-                    f"error: repeated patch detected for {vpath}; "
+                    f"error: repeated patch detected for {to_display_path(vpath)}; "
                     "do not repeat the same patch. Re-read the file and use "
                     "a different patch with correct context, or switch to edit/write."
                 )
 
         idx = 1
         files_changed: List[str] = []
+        state_lines: List[str] = []
+        change_summaries: List[str] = []
+        preview_blocks: List[str] = []
         additions = 0
         removals = 0
 
@@ -276,19 +333,37 @@ def apply_patch_fn(args: Any) -> str:
                 updated = move_to or path
                 # Check for no-op (file unchanged after patch)
                 new_bytes = _read_file_bytes(updated)
+                before_sha = _sha256(old_bytes)[:12] if old_bytes is not None else "unknown"
+                after_sha = _sha256(new_bytes)[:12] if new_bytes is not None else "unknown"
                 if old_bytes is not None and new_bytes is not None and old_bytes == new_bytes:
                     noop_key = updated
                     _NOOP_COUNTS.setdefault(noop_key, {})
                     _NOOP_COUNTS[noop_key]["apply_patch"] = _NOOP_COUNTS[noop_key].get("apply_patch", 0) + 1
                     noop_n = _NOOP_COUNTS[noop_key]["apply_patch"]
+                    mutation = _record_mutation(
+                        op="apply_patch",
+                        path=updated,
+                        changed=False,
+                        before_sha=before_sha,
+                        after_sha=after_sha,
+                        changed_lines_est=0,
+                        noop_streak_for_file=noop_n,
+                    )
+                    decision_hint = _mutation_decision_hint(mutation)
+                    state_brief = _mutation_brief_line(mutation)
+                    state_line = _mutation_state_line(mutation)
                     hint = ""
                     if noop_n >= 2:
                         hint = " STOP using apply_patch for this file; switch to edit or write."
+                    updated_display = to_display_path(updated)
                     return (
-                        f"error: patch produced no changes for {updated} (no-op). "
+                        f"error: patch produced no changes for {updated_display} (no-op). "
                         f"The file content is identical before and after.{hint}\n"
                         "ACTION: read the file, then create a patch that actually modifies content, "
-                        "or use edit/write."
+                        "or use edit/write.\n"
+                        f"{decision_hint}\n"
+                        f"{state_brief}\n"
+                        f"{state_line}"
                     )
                 try:
                     with open(updated, "r", encoding="utf-8") as f:
@@ -304,8 +379,28 @@ def apply_patch_fn(args: Any) -> str:
                 orig_hash = patch_file_hashes.get(path)
                 if orig_hash:
                     _LAST_PATCH_HASH[updated] = orig_hash
-                    if move_to and updated != path:
-                        _LAST_PATCH_HASH.pop(path, None)
+                if move_to and updated != path:
+                    _LAST_PATCH_HASH.pop(path, None)
+                mutation = _record_mutation(
+                    op="apply_patch",
+                    path=updated,
+                    changed=True,
+                    before_sha=before_sha,
+                    after_sha=after_sha,
+                    noop_streak_for_file=0,
+                )
+                state_lines.append(_mutation_decision_hint(mutation))
+                state_lines.append(_mutation_brief_line(mutation))
+                state_lines.append(_mutation_state_line(mutation))
+                old_text = old_bytes.decode("utf-8", errors="replace") if old_bytes is not None else ""
+                new_text = new_bytes.decode("utf-8", errors="replace") if new_bytes is not None else ""
+                changed_est = _changed_lines_est(old_text, new_text)
+                change_summaries.append(
+                    f"{os.path.basename(updated)}: sha={before_sha}->{after_sha} changed_lines~={changed_est}"
+                )
+                preview_blocks.append(
+                    f"{os.path.basename(updated)}:\n{_changed_line_preview(old_text, new_text)}"
+                )
                 files_changed.append(updated)
                 continue
 
@@ -321,13 +416,31 @@ def apply_patch_fn(args: Any) -> str:
                         additions += 1
                     idx += 1
                 _apply_add_patch(path, change_lines)
+                after_sha = "unknown"
                 try:
                     with open(path, "r", encoding="utf-8") as f:
-                        _track_file_version(path, f.read())
+                        txt = f.read()
+                        _track_file_version(path, txt)
+                        after_sha = _short_sha_text(txt)
                 except Exception:
                     FILE_VERSIONS.pop(path, None)
                 if path in patch_file_hashes:
                     _LAST_PATCH_HASH[path] = patch_file_hashes[path]
+                mutation = _record_mutation(
+                    op="apply_patch",
+                    path=path,
+                    changed=True,
+                    before_sha=_short_sha_text(""),
+                    after_sha=after_sha,
+                    noop_streak_for_file=0,
+                )
+                state_lines.append(_mutation_decision_hint(mutation))
+                state_lines.append(_mutation_brief_line(mutation))
+                state_lines.append(_mutation_state_line(mutation))
+                if after_sha != "unknown":
+                    change_summaries.append(
+                        f"{os.path.basename(path)}: sha={_short_sha_text('')}->{after_sha} changed_lines~=new_file"
+                    )
                 files_changed.append(path)
                 continue
 
@@ -335,16 +448,33 @@ def apply_patch_fn(args: Any) -> str:
                 raw_path = line[len("*** Delete File: "):].strip()
                 path = _validate_path(raw_path, check_exists=True)
                 idx += 1
+                before_sha = "unknown"
                 if os.path.exists(path):
                     try:
                         with open(path, "r", encoding="utf-8") as f:
-                            removals += len(f.readlines())
+                            txt = f.read()
+                            removals += len(txt.splitlines())
+                            before_sha = _short_sha_text(txt)
                     except Exception:
                         pass
                 _apply_delete_patch(path)
                 FILE_VERSIONS.pop(path, None)
                 if path in patch_file_hashes:
                     _LAST_PATCH_HASH[path] = patch_file_hashes[path]
+                mutation = _record_mutation(
+                    op="apply_patch",
+                    path=path,
+                    changed=True,
+                    before_sha=before_sha,
+                    after_sha="deleted",
+                    noop_streak_for_file=0,
+                )
+                state_lines.append(_mutation_decision_hint(mutation))
+                state_lines.append(_mutation_brief_line(mutation))
+                state_lines.append(_mutation_state_line(mutation))
+                change_summaries.append(
+                    f"{os.path.basename(path)}: sha={before_sha}->deleted changed_lines~=deleted_file"
+                )
                 files_changed.append(path)
                 continue
 
@@ -353,6 +483,38 @@ def apply_patch_fn(args: Any) -> str:
         if not files_changed:
             return "error: no file operations found in patch"
 
+        stats_parts: List[str] = []
+        for changed_path in files_changed[:3]:
+            try:
+                with open(changed_path, "r", encoding="utf-8") as fh:
+                    txt = fh.read()
+                line_count = txt.count("\n") + (0 if txt.endswith("\n") else 1 if txt else 0)
+                digest = hashlib.sha256(txt.encode("utf-8")).hexdigest()[:12]
+                stats_parts.append(
+                    f"{os.path.basename(changed_path)}:lines={line_count},chars={len(txt)},sha256={digest}"
+                )
+            except Exception:
+                continue
+        stats = "; ".join(stats_parts)
+        state_block = "\n".join(state_lines)
+        summary_block = "\n".join(change_summaries[:3])
+        preview_block = "\n---\n".join(preview_blocks[:2])
+        if stats:
+            out = [
+                f"ok: {len(files_changed)} file(s) changed, +{additions} -{removals}",
+                f"file_state: {stats}",
+            ]
+            if summary_block:
+                out.append(f"change_summary:\n{summary_block}")
+            if preview_block:
+                out.append(f"changed_lines_preview:\n{preview_block}")
+            if state_block:
+                out.append(state_block)
+            return "\n".join(out)
+        if state_block:
+            return f"ok: {len(files_changed)} file(s) changed, +{additions} -{removals}\n{state_block}"
         return f"ok: {len(files_changed)} file(s) changed, +{additions} -{removals}"
-    except Exception as exc:
+    except ValueError as exc:
         return f"error: {exc}"
+    except Exception:
+        return "error: failed to apply patch"

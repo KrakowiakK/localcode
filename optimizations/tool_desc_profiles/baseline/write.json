@@ -1,0 +1,15 @@
+{
+  "name": "write",
+  "aliases": ["write_file"],
+  "category": "write",
+  "description": "Create or overwrite a file. Parent directories are created automatically.\n\nUseful for:\n- creating new files\n- full rewrites\n- resolving patch/edit failures on small files\n\nAccepted arg aliases:\n- file / filename / file_path / filepath / file_name -> path\n- text / data / code / body / source -> content\n\nNotes:\n- This operation replaces the full file content.\n- Include all content you want to keep.\n\nExamples:\n- {{tool:write}}({\"path\": \"config.json\", \"content\": \"{\\\"debug\\\": true}\"})\n- {{tool:write}}({\"file\": \"app.js\", \"code\": \"...full file...\"})\n\nReturns: ok: created/updated path, +N lines",
+  "additionalProperties": false,
+  "parameters": {
+    "path": "string",
+    "content": {
+      "type": "string",
+      "description": "Full file content to write"
+    }
+  },
+  "handler": "write"
+}

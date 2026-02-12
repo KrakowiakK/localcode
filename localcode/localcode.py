@@ -8,6 +8,7 @@ localcode - agent runner with native tool calls.
 """
 
 import argparse
+import copy
 import glob as globlib
 import json
 import os
@@ -30,7 +31,6 @@ if _parent_dir not in sys.path:
 
 from localcode import hooks
 from localcode.middleware import logging_hook
-from localcode.task_manager import TaskManager
 
 # Phase 3: config, session, model_calls extracted
 from localcode.config import (
@@ -193,12 +193,8 @@ SANDBOX_ROOT: Optional[str] = None
 
 # Current conversation messages (for tools that need history access like plan_solution)
 CURRENT_MESSAGES: List[Dict[str, Any]] = []
-TASK_MANAGER: Optional[TaskManager] = None
-TASKS_CAPTURE_MODE: bool = False
-TASKS_CAPTURED: List[Dict[str, Any]] = []
-FLOW_STAGE_SIGNAL: Optional[Dict[str, Any]] = None
-FLOW_STAGE_EXPECTED: Optional[str] = None
 FINISH_SIGNAL: Optional[Dict[str, Any]] = None
+LAST_REQUEST_SNAPSHOT: Optional[Dict[str, Any]] = None
 
 # ANSI colors
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
@@ -229,14 +225,6 @@ TOOL_DISPLAY_MAP: Dict[str, str] = _tool_state.TOOL_DISPLAY_MAP
 def _turn_summary_enabled() -> bool:
     value = os.environ.get("LOCALCODE_TURN_SUMMARY", "")
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _thinking_visible() -> bool:
-    value = os.environ.get("LOCALCODE_THINKING_VISIBILITY", "")
-    if value:
-        return str(value).strip().lower() not in {"0", "false", "no", "off", "hidden"}
-    mode = str(AGENT_SETTINGS.get("thinking_visibility", "show")).strip().lower()
-    return mode in {"show", "visible", "on", "true"}
 
 
 def _is_benchmark_mode() -> bool:
@@ -332,44 +320,6 @@ def _print_turn_summary(turn: int, tool_calls: List[Dict[str, Any]], content: st
         print(thinking)
         print(footer)
     print(_format_turn_actions(turn, tool_calls, content))
-    sys.stdout.flush()
-
-
-def _format_phase_signals(signals: Optional[Dict[str, Any]]) -> str:
-    if not signals:
-        return ""
-    parts: List[str] = []
-    for key in ("files_read", "files_changed", "read_tools", "write_tools", "plan_tools", "code_change", "plan_detected"):
-        if key not in signals:
-            continue
-        val = signals.get(key)
-        if isinstance(val, (set, list, tuple)):
-            val = len(val)
-        parts.append(f"{key}={val}")
-    return " ".join(parts)
-
-
-def _print_phase_event(kind: str, payload: Dict[str, Any]) -> None:
-    if not payload:
-        return
-    turn = payload.get("turn")
-    if kind == "transition":
-        label = f"{payload.get('from', '?')} -> {payload.get('to', '?')}"
-    elif kind == "state":
-        label = str(payload.get("phase", "?"))
-    else:
-        label = str(payload.get("phase") or payload.get("event") or kind)
-    sig_str = _format_phase_signals(payload.get("signals") if isinstance(payload.get("signals"), dict) else None)
-    parts = [f"{DIM}[phase]{RESET}", label]
-    if turn:
-        parts.append(f"(turn {turn})")
-    line = " ".join(parts)
-    if sig_str:
-        line = f"{line} {DIM}{sig_str}{RESET}"
-    err = payload.get("error")
-    if err and kind not in {"state", "transition"}:
-        line = f"{line} {DIM}error={err}{RESET}"
-    print(line)
     sys.stdout.flush()
 
 
@@ -505,25 +455,53 @@ def build_tool_alias_map(tool_defs: Dict[str, Dict[str, Any]]) -> Dict[str, str]
     return alias_map
 
 
-def build_tool_category_map(tool_defs: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+def build_tool_category_map(
+    tool_defs: Dict[str, Dict[str, Any]],
+    active_tools: Optional[List[str]] = None,
+    display_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
     """
-    Extract tool categories from tool definitions.
+    Extract tool categories for the active tool set.
 
-    Returns a map of tool_name -> category (e.g., "read" or "write").
-    Also includes aliases mapped to their category.
+    Returns a map of tool_name -> category (e.g., "read"/"write"), including:
+    - canonical tool names
+    - aliases declared in tool definitions
+    - display aliases exposed to the model (if provided)
+
+    If active_tools is None, all tool definitions are included.
     """
     category_map: Dict[str, str] = {}
-    for name, tool_def in tool_defs.items():
+    selected_tools = active_tools if active_tools is not None else list(tool_defs.keys())
+
+    for name in selected_tools:
+        tool_def = tool_defs.get(name)
+        if not isinstance(tool_def, dict):
+            continue
         category = tool_def.get("category")
-        if category and isinstance(category, str):
-            category = category.strip().lower()
-            # Map canonical name
-            category_map[name] = category
-            # Also map all aliases
-            aliases = tool_def.get("aliases") or []
-            for alias in aliases:
-                if isinstance(alias, str):
-                    category_map[alias.strip().lower()] = category
+        if not isinstance(category, str):
+            continue
+        category = category.strip().lower()
+        if not category:
+            continue
+
+        canonical = str(name).strip().lower()
+        if canonical:
+            category_map[canonical] = category
+
+        aliases = tool_def.get("aliases") or []
+        for alias in aliases:
+            if not isinstance(alias, str):
+                continue
+            alias_key = alias.strip().lower()
+            if alias_key:
+                category_map[alias_key] = category
+
+        if isinstance(display_map, dict):
+            display_name = display_map.get(name)
+            if isinstance(display_name, str):
+                display_key = display_name.strip().lower()
+                if display_key:
+                    category_map[display_key] = category
     return category_map
 
 
@@ -619,6 +597,53 @@ def format_tool_list(
     return "\n".join(lines)
 
 
+def _normalize_overlay_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _select_prompt_overlay(agent_config: Dict[str, Any]) -> Optional[str]:
+    overlays = agent_config.get("prompt_overlays")
+    if not isinstance(overlays, dict) or not overlays:
+        return None
+
+    valid_keys: List[str] = []
+    for key, value in overlays.items():
+        if isinstance(key, str) and key.strip() and isinstance(value, str) and value.strip():
+            valid_keys.append(key)
+    if not valid_keys:
+        return None
+
+    forced = str(os.environ.get("LOCALCODE_PROMPT_OVERLAY") or "").strip().lower()
+    if forced:
+        for key in valid_keys:
+            if forced == str(key).strip().lower():
+                return key
+
+    probes: List[str] = []
+    env_task_id = str(os.environ.get("LOCALCODE_TASK_ID") or "").strip()
+    if env_task_id:
+        probes.append(env_task_id)
+    if TASK_ID:
+        probes.append(str(TASK_ID))
+    cwd = os.getcwd()
+    if cwd:
+        probes.append(cwd)
+        probes.append(os.path.basename(cwd))
+
+    normalized_probes = [_normalize_overlay_token(p) for p in probes if p]
+    normalized_probes = [p for p in normalized_probes if p]
+    if not normalized_probes:
+        return None
+
+    for key in valid_keys:
+        token = _normalize_overlay_token(key)
+        if not token:
+            continue
+        if any(token in probe for probe in normalized_probes):
+            return key
+    return None
+
+
 def load_system_prompt(
     agent_config: Dict[str, Any],
     tool_defs: Dict[str, Dict[str, Any]],
@@ -629,7 +654,55 @@ def load_system_prompt(
     prompt = load_text(prompt_path)
     tool_list = format_tool_list(tool_defs, tool_order, display_map)
     prompt = prompt.replace("{{TOOLS}}", tool_list)
-    return render_tool_description(prompt, display_map)
+    prompt = render_tool_description(prompt, display_map)
+
+    overlay_key = _select_prompt_overlay(agent_config)
+    if overlay_key:
+        overlays = agent_config.get("prompt_overlays") or {}
+        overlay_rel = overlays.get(overlay_key)
+        if isinstance(overlay_rel, str) and overlay_rel.strip():
+            overlay_path = overlay_rel if os.path.isabs(overlay_rel) else os.path.join(BASE_DIR, overlay_rel)
+            overlay_text = load_text(overlay_path)
+            overlay_text = overlay_text.replace("{{TOOLS}}", tool_list)
+            overlay_text = render_tool_description(overlay_text, display_map).strip()
+            if overlay_text:
+                prompt = f"{prompt.rstrip()}\n\n{overlay_text}\n"
+    return prompt
+
+
+DEPRECATED_AGENT_SETTING_KEYS = {
+    "task_branching",
+    "task_flow_mode",
+    "task_replan_max",
+    "task_plan_mode",
+    "task_skip_readonly",
+    "task_output_mode",
+    "benchmark_output_mode",
+    "flow",
+    "flow_stage_retries",
+    "flow_stage_required",
+    "history_mode",
+    "history_keep_first",
+    "history_strip_thinking",
+    "history_tool_truncate_chars",
+    "history_tool_truncate_keep_last",
+    "history_tool_call_args_truncate_chars",
+    "history_tool_call_args_keep_last",
+    "flow_history_mode",
+    "flow_history_max_messages",
+    "flow_history_keep_first",
+    "flow_history_strip_thinking",
+    "flow_history_tool_truncate_chars",
+    "flow_history_tool_truncate_keep_last",
+    "flow_context_window",
+    "flow_retry_hints",
+    "phase_control",
+    "phase_log",
+    "progress_injection",
+    "progress_max_tokens",
+    "read_loop_nudge_threshold",
+    "finish_nudge_remaining_turns",
+}
 
 
 def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -641,177 +714,42 @@ def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
         "require_code_change": False,
         "native_thinking": False,
         "thinking_visibility": "show",
-        "task_branching": False,
-        "task_flow_mode": "branched",
-        "task_replan_max": 0,
-        "task_plan_mode": "explore",
-        "task_skip_readonly": False,
-        "task_output_mode": "human",
-        "benchmark_output_mode": "model",
-        "flow": None,
-        "flow_stage_retries": 0,
-        "flow_stage_required": True,
-        "history_mode": "full",
         "history_max_messages": 0,
-        "history_keep_first": False,
-        "flow_history_mode": None,
-        "flow_history_max_messages": None,
-        "flow_history_keep_first": True,
-        "history_strip_thinking": False,
-        "flow_history_strip_thinking": None,
-        "history_tool_truncate_chars": 0,
-        "history_tool_truncate_keep_last": 0,
-        "history_tool_call_args_truncate_chars": 0,
-        "history_tool_call_args_keep_last": 0,
-        "flow_history_tool_truncate_chars": None,
-        "flow_history_tool_truncate_keep_last": None,
-        "flow_context_window": 6,
-        "flow_retry_hints": True,
-        "phase_control": None,
-        "phase_log": "off",
-        "progress_injection": False,
-        "progress_max_tokens": 48,
+        "max_turns": MAX_TURNS,
+        "send_tool_categories": True,
+        "deprecated_ignored_keys": [],
     }
 
-    for k in ("min_tool_calls", "max_format_retries", "max_turns"):
-        if k in agent_config:
-            settings[k] = agent_config[k]
+    if "min_tool_calls" in agent_config:
+        settings["min_tool_calls"] = max(0, int(agent_config["min_tool_calls"] or 0))
+    if "max_format_retries" in agent_config:
+        settings["max_format_retries"] = max(0, int(agent_config["max_format_retries"] or 0))
+    if "max_turns" in agent_config:
+        settings["max_turns"] = max(1, int(agent_config["max_turns"] or 0))
 
     for k in ("auto_tool_call_on_failure", "require_code_change"):
         if k in agent_config:
-            settings[k] = agent_config[k]
-
-    if "task_branching" in agent_config:
-        settings["task_branching"] = bool(agent_config["task_branching"])
-    if "task_flow_mode" in agent_config:
-        settings["task_flow_mode"] = str(agent_config["task_flow_mode"] or "branched").strip().lower()
-    env_flow_mode = os.environ.get("LOCALCODE_TASK_FLOW_MODE")
-    if env_flow_mode:
-        settings["task_flow_mode"] = str(env_flow_mode).strip().lower()
-    if settings["task_flow_mode"] not in {"branched", "staged3"}:
-        raise ValueError("Agent config 'task_flow_mode' must be 'branched' or 'staged3'")
-    if "flow" in agent_config:
-        flow = agent_config.get("flow")
-        if flow is not None and not isinstance(flow, list):
-            raise ValueError("Agent config 'flow' must be a list of stages or null")
-        settings["flow"] = flow
-    if "flow_stage_retries" in agent_config:
-        settings["flow_stage_retries"] = int(agent_config["flow_stage_retries"] or 0)
-    if "flow_stage_required" in agent_config:
-        settings["flow_stage_required"] = bool(agent_config["flow_stage_required"])
-    if "history_mode" in agent_config:
-        settings["history_mode"] = str(agent_config["history_mode"] or "full").strip().lower()
+            settings[k] = bool(agent_config[k])
     if "history_max_messages" in agent_config:
-        settings["history_max_messages"] = int(agent_config["history_max_messages"] or 0)
-    if "history_keep_first" in agent_config:
-        settings["history_keep_first"] = bool(agent_config["history_keep_first"])
-    if "flow_history_mode" in agent_config:
-        raw = agent_config.get("flow_history_mode")
-        settings["flow_history_mode"] = str(raw).strip().lower() if raw is not None else None
-    if "flow_history_max_messages" in agent_config:
-        raw = agent_config.get("flow_history_max_messages")
-        settings["flow_history_max_messages"] = int(raw) if raw is not None else None
-    if "flow_history_keep_first" in agent_config:
-        settings["flow_history_keep_first"] = bool(agent_config["flow_history_keep_first"])
-    if "history_strip_thinking" in agent_config:
-        settings["history_strip_thinking"] = bool(agent_config["history_strip_thinking"])
-    if "flow_history_strip_thinking" in agent_config:
-        raw = agent_config.get("flow_history_strip_thinking")
-        settings["flow_history_strip_thinking"] = bool(raw) if raw is not None else None
-    if "history_tool_truncate_chars" in agent_config:
-        settings["history_tool_truncate_chars"] = int(agent_config["history_tool_truncate_chars"] or 0)
-    if "history_tool_truncate_keep_last" in agent_config:
-        settings["history_tool_truncate_keep_last"] = int(agent_config["history_tool_truncate_keep_last"] or 0)
-    if "history_tool_call_args_truncate_chars" in agent_config:
-        settings["history_tool_call_args_truncate_chars"] = int(agent_config["history_tool_call_args_truncate_chars"] or 0)
-    if "history_tool_call_args_keep_last" in agent_config:
-        settings["history_tool_call_args_keep_last"] = int(agent_config["history_tool_call_args_keep_last"] or 0)
-    if "flow_history_tool_truncate_chars" in agent_config:
-        raw = agent_config.get("flow_history_tool_truncate_chars")
-        settings["flow_history_tool_truncate_chars"] = int(raw) if raw is not None else None
-    if "flow_history_tool_truncate_keep_last" in agent_config:
-        raw = agent_config.get("flow_history_tool_truncate_keep_last")
-        settings["flow_history_tool_truncate_keep_last"] = int(raw) if raw is not None else None
-    if "flow_context_window" in agent_config:
-        settings["flow_context_window"] = int(agent_config["flow_context_window"] or 0)
-    if "flow_retry_hints" in agent_config:
-        settings["flow_retry_hints"] = bool(agent_config["flow_retry_hints"])
-    if "phase_control" in agent_config:
-        settings["phase_control"] = agent_config.get("phase_control")
-    if "task_replan_max" in agent_config:
-        settings["task_replan_max"] = int(agent_config["task_replan_max"] or 0)
-    if "task_plan_mode" in agent_config:
-        settings["task_plan_mode"] = str(agent_config["task_plan_mode"] or "explore").strip().lower()
-        if settings["task_plan_mode"] not in {"explore", "first", "none"}:
-            raise ValueError("Agent config 'task_plan_mode' must be one of: explore, first, none")
-    if "task_skip_readonly" in agent_config:
-        settings["task_skip_readonly"] = bool(agent_config["task_skip_readonly"])
-    env_skip_readonly = os.environ.get("LOCALCODE_TASK_SKIP_READONLY", "")
-    if env_skip_readonly:
-        settings["task_skip_readonly"] = str(env_skip_readonly).strip().lower() in {"1", "true", "yes", "on"}
-
-    if "task_output_mode" in agent_config:
-        settings["task_output_mode"] = str(agent_config["task_output_mode"] or "human").strip().lower()
-    env_output_mode = os.environ.get("LOCALCODE_TASK_OUTPUT_MODE")
-    if env_output_mode:
-        settings["task_output_mode"] = str(env_output_mode).strip().lower()
-    if settings["task_output_mode"] not in {"human", "runtime"}:
-        raise ValueError("Agent config 'task_output_mode' must be 'human' or 'runtime'")
-
-    if "benchmark_output_mode" in agent_config:
-        settings["benchmark_output_mode"] = str(agent_config["benchmark_output_mode"] or "model").strip().lower()
-    env_benchmark_mode = os.environ.get("LOCALCODE_BENCHMARK_OUTPUT_MODE")
-    if env_benchmark_mode:
-        settings["benchmark_output_mode"] = str(env_benchmark_mode).strip().lower()
-    if settings["benchmark_output_mode"] not in {"model", "runtime"}:
-        raise ValueError("Agent config 'benchmark_output_mode' must be 'model' or 'runtime'")
-
-    if "phase_log" in agent_config:
-        settings["phase_log"] = agent_config.get("phase_log")
-    env_phase_log = os.environ.get("LOCALCODE_PHASE_LOG")
-    if env_phase_log:
-        settings["phase_log"] = env_phase_log
-    raw_phase_log = settings.get("phase_log")
-    if isinstance(raw_phase_log, bool):
-        phase_log_mode = "both" if raw_phase_log else "off"
-    elif raw_phase_log is None:
-        phase_log_mode = "off"
-    else:
-        phase_log_mode = str(raw_phase_log).strip().lower()
-        if phase_log_mode in {"1", "true", "yes", "on"}:
-            phase_log_mode = "both"
-        elif phase_log_mode in {"0", "false", "no", "off", "none"}:
-            phase_log_mode = "off"
-    if phase_log_mode not in {"off", "stdout", "log", "both"}:
-        phase_log_mode = "off"
-    settings["phase_log"] = phase_log_mode
-
-    if "progress_injection" in agent_config:
-        settings["progress_injection"] = bool(agent_config["progress_injection"])
-    env_progress = os.environ.get("LOCALCODE_PROGRESS_INJECTION", "")
-    if env_progress:
-        settings["progress_injection"] = str(env_progress).strip().lower() in {"1", "true", "yes", "on"}
-
-    if "progress_max_tokens" in agent_config:
-        settings["progress_max_tokens"] = int(agent_config["progress_max_tokens"] or 0)
-    env_progress_max = os.environ.get("LOCALCODE_PROGRESS_MAX_TOKENS", "")
-    if env_progress_max:
+        settings["history_max_messages"] = max(0, int(agent_config["history_max_messages"] or 0))
+    env_history_max = os.environ.get("LOCALCODE_HISTORY_MAX_MESSAGES", "")
+    if env_history_max:
         try:
-            settings["progress_max_tokens"] = int(env_progress_max)
+            settings["history_max_messages"] = max(0, int(env_history_max))
         except ValueError:
             pass
-    settings["progress_max_tokens"] = max(16, int(settings.get("progress_max_tokens", 48) or 48))
 
+    if "send_tool_categories" in agent_config:
+        settings["send_tool_categories"] = bool(agent_config["send_tool_categories"])
+    env_send_tool_categories = os.environ.get("LOCALCODE_SEND_TOOL_CATEGORIES", "")
+    if env_send_tool_categories:
+        settings["send_tool_categories"] = str(env_send_tool_categories).strip().lower() in {"1", "true", "yes", "on"}
     if "native_thinking" in agent_config:
         settings["native_thinking"] = bool(agent_config["native_thinking"])
-
     if "thinking_visibility" in agent_config:
-        settings["thinking_visibility"] = agent_config["thinking_visibility"]
-
-    thinking_visibility = str(settings.get("thinking_visibility", "show")).strip().lower()
-    if thinking_visibility not in {"show", "hidden"}:
-        raise ValueError("Agent config 'thinking_visibility' must be 'show' or 'hidden'")
-    settings["thinking_visibility"] = thinking_visibility
+        settings["thinking_visibility"] = str(agent_config["thinking_visibility"] or "show").strip().lower()
+    if settings["thinking_visibility"] not in {"show", "hidden"}:
+        settings["thinking_visibility"] = "show"
 
     overrides: Dict[str, Any] = {}
     raw_overrides = agent_config.get("request_overrides", {})
@@ -823,22 +761,17 @@ def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
     if "tool_choice" in agent_config:
         overrides.setdefault("tool_choice", agent_config["tool_choice"])
 
-    think_value = normalize_bool_auto(agent_config.get("think"), "think")
-    if think_value is not None:
-        overrides.setdefault("think", think_value)
-
     cache_value = normalize_bool_auto(agent_config.get("cache"), "cache")
     if cache_value is not None:
         overrides.setdefault("cache", cache_value)
-
-    if "think_level" in agent_config:
-        think_level_value = agent_config["think_level"]
-        # Only set reasoning_effort if think_level is not null/None
-        if think_level_value is not None:
-            overrides.setdefault("reasoning_effort", think_level_value)
-        if think_value is True:
-            overrides.setdefault("think", True)
-
+    think_value = normalize_bool_auto(agent_config.get("think"), "think")
+    if think_value is not None:
+        overrides.setdefault("think", think_value)
+    think_level_value = agent_config.get("think_level")
+    if think_level_value is None and "thinking_level" in agent_config:
+        think_level_value = agent_config.get("thinking_level")
+    if think_level_value is not None:
+        overrides.setdefault("reasoning_effort", think_level_value)
     if think_value is True or settings["native_thinking"]:
         overrides.setdefault("return_thinking", True)
 
@@ -847,6 +780,9 @@ def build_agent_settings(agent_config: Dict[str, Any]) -> Dict[str, Any]:
         overrides.setdefault("max_batch_tool_calls", agent_config["max_batch_tool_calls"])
 
     settings["request_overrides"] = overrides
+    settings["deprecated_ignored_keys"] = sorted(
+        key for key in DEPRECATED_AGENT_SETTING_KEYS if key in agent_config
+    )
     return settings
 
 
@@ -871,6 +807,12 @@ def _self_call(
     timeout: int = 120,
     include_history: bool = True,
     user_prefix: str = "",
+    include_tool_messages: bool = True,
+    include_tool_call_summaries: bool = False,
+    history_sanitize: bool = False,
+    history_tool_result_chars: int = 500,
+    history_tool_call_args_chars: int = 180,
+    tool_choice: Optional[str] = "none",
 ) -> str:
     """Make an API call to the same model (self-reflection / thinking)."""
     return _self_call_impl(
@@ -881,6 +823,12 @@ def _self_call(
         timeout=timeout,
         include_history=include_history,
         user_prefix=user_prefix,
+        include_tool_messages=include_tool_messages,
+        include_tool_call_summaries=include_tool_call_summaries,
+        history_sanitize=history_sanitize,
+        history_tool_result_chars=history_tool_result_chars,
+        history_tool_call_args_chars=history_tool_call_args_chars,
+        tool_choice=tool_choice,
         api_url=API_URL,
         model=MODEL,
         current_messages=CURRENT_MESSAGES,
@@ -895,6 +843,12 @@ def _self_call_batch(
     timeout: int = 120,
     include_history: bool = True,
     max_concurrent: int = 4,
+    include_tool_messages: bool = True,
+    include_tool_call_summaries: bool = False,
+    history_sanitize: bool = False,
+    history_tool_result_chars: int = 500,
+    history_tool_call_args_chars: int = 180,
+    tool_choice: Optional[str] = "none",
 ) -> str:
     """Send multiple questions concurrently via ThreadPoolExecutor."""
     return _self_call_batch_impl(
@@ -905,6 +859,12 @@ def _self_call_batch(
         timeout=timeout,
         include_history=include_history,
         max_concurrent=max_concurrent,
+        include_tool_messages=include_tool_messages,
+        include_tool_call_summaries=include_tool_call_summaries,
+        history_sanitize=history_sanitize,
+        history_tool_result_chars=history_tool_result_chars,
+        history_tool_call_args_chars=history_tool_call_args_chars,
+        tool_choice=tool_choice,
         api_url=API_URL,
         model=MODEL,
         current_messages=CURRENT_MESSAGES,
@@ -957,16 +917,25 @@ def format_usage_info(usage: Optional[Dict[str, Any]], timings: Optional[Dict[st
     ttft = timing.get("ttft", 0)
     prefill_tps = (timings or {}).get("prompt_per_second", 0) or timing.get("prefill_tps", 0)
     decode_tps = (timings or {}).get("predicted_per_second", 0) or timing.get("decode_tps", 0)
+    total_tps = (timings or {}).get("total_per_second", 0) or timing.get("total_tps", 0)
+    elapsed_s = (timings or {}).get("elapsed_seconds", 0) or timing.get("elapsed_seconds", 0)
     tps_estimated = bool((timings or {}).get("estimated", False) or timing.get("estimated", False))
-    tps_mark = "~" if tps_estimated else ""
 
     parts = [f"{prompt_tokens}→{completion_tokens} tok"]
     if ttft:
         parts.append(f"TTFT {float(ttft):.2f}s")
-    if prefill_tps:
-        parts.append(f"prefill {tps_mark}{float(prefill_tps):.0f} t/s")
-    if decode_tps:
-        parts.append(f"decode {tps_mark}{float(decode_tps):.1f} t/s")
+    if tps_estimated:
+        # Only total throughput is meaningful when estimated from wall time
+        if total_tps:
+            parts.append(f"~{float(total_tps):.0f} tok/s total")
+        if elapsed_s:
+            parts.append(f"{float(elapsed_s):.1f}s")
+    else:
+        # Server provided real per-phase timings
+        if prefill_tps:
+            parts.append(f"prefill {float(prefill_tps):.0f} t/s")
+        if decode_tps:
+            parts.append(f"decode {float(decode_tps):.1f} t/s")
     return " | ".join(parts)
 
 
@@ -994,6 +963,34 @@ def normalize_analysis_only(content: Optional[str]) -> Tuple[Optional[str], bool
     if match:
         return match.group(1), True
     return content, True
+
+
+def extract_assistant_thinking(message: Dict[str, Any], raw_content: str) -> Optional[str]:
+    """Extract assistant reasoning text from structured fields or Harmony content."""
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning.strip()
+
+    thinking = message.get("thinking")
+    if isinstance(thinking, str) and thinking.strip():
+        return thinking.strip()
+    if isinstance(thinking, dict):
+        for key in ("content", "text", "reasoning", "analysis"):
+            val = thinking.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+    if isinstance(raw_content, str) and "<|channel|>analysis<|message|>" in raw_content:
+        match = re.search(
+            r"<\|channel\|>analysis<\|message\|>(.*?)(?:<\|end\|>|<\|channel\|>|$)",
+            raw_content,
+            re.DOTALL,
+        )
+        if match:
+            extracted = match.group(1).strip()
+            if extracted:
+                return extracted
+    return None
 
 
 # ---------------------------
@@ -1056,6 +1053,7 @@ def trim_messages(messages: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_C
 
 
 def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: ToolsDict, request_overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    global LAST_REQUEST_SNAPSHOT
     trimmed = trim_messages(messages)
     full_messages = [{"role": "system", "content": system_prompt}] + trimmed
     request_data: Dict[str, Any] = {
@@ -1066,8 +1064,10 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
         "tools": make_openai_tools(tools_dict, TOOL_DISPLAY_MAP),
     }
 
-    # Add tool categories for semantic filtering (GPT-OSS batching)
-    if TOOL_CATEGORIES:
+    # Optional: include tool categories for semantic filtering.
+    # Some models (e.g. smaller FC models) perform better with only canonical OpenAI fields.
+    send_tool_categories = bool(AGENT_SETTINGS.get("send_tool_categories", True))
+    if send_tool_categories and TOOL_CATEGORIES:
         request_data["tool_categories"] = TOOL_CATEGORIES
 
     for k, v in INFERENCE_PARAMS.items():
@@ -1107,12 +1107,22 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
         "inference_params_full": all_inference_params,
     })
 
+    request_data_before_hooks = copy.deepcopy(request_data)
+
     # Hook: api_request (mutable — hooks can modify request_data)
     hook_data = hooks.emit("api_request", {
         "messages": full_messages,
         "request_data": request_data,
     })
     request_data = hook_data.get("request_data", request_data)
+    if tools_dict and (not isinstance(request_data.get("tools"), list) or not request_data.get("tools")):
+        # Keep request complete for tool-capable agents even if a hook dropped tools by mistake.
+        request_data["tools"] = request_data_before_hooks.get("tools", [])
+        logging_hook.log_event("api_request_tools_restored", {
+            "reason": "missing_or_empty_tools_after_hooks",
+            "tool_count": len(request_data.get("tools") or []),
+        })
+    LAST_REQUEST_SNAPSHOT = copy.deepcopy(request_data)
 
     req = urllib.request.Request(
         API_URL,
@@ -1186,11 +1196,21 @@ def call_api(messages: List[Dict[str, Any]], system_prompt: str, tools_dict: Too
     if not timings and isinstance(usage, dict):
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
-        if isinstance(prompt_tokens, (int, float)) and isinstance(completion_tokens, (int, float)):
+        # Check for real TPS from patched mlx-lm server (usage.prompt_tps / usage.generation_tps)
+        mlx_prompt_tps = usage.get("prompt_tps")
+        mlx_generation_tps = usage.get("generation_tps")
+        if mlx_prompt_tps or mlx_generation_tps:
+            total_tokens = float(prompt_tokens or 0) + float(completion_tokens or 0)
+            timings = {
+                "prompt_per_second": float(mlx_prompt_tps or 0),
+                "predicted_per_second": float(mlx_generation_tps or 0),
+                "total_per_second": (total_tokens / request_elapsed_s) if total_tokens > 0 else 0.0,
+                "elapsed_seconds": request_elapsed_s,
+            }
+            payload["timings"] = timings
+        elif isinstance(prompt_tokens, (int, float)) and isinstance(completion_tokens, (int, float)):
             total_tokens = float(prompt_tokens) + float(completion_tokens)
             timings = {
-                "prompt_per_second": (float(prompt_tokens) / request_elapsed_s) if prompt_tokens > 0 else 0.0,
-                "predicted_per_second": (float(completion_tokens) / request_elapsed_s) if completion_tokens > 0 else 0.0,
                 "total_per_second": (total_tokens / request_elapsed_s) if total_tokens > 0 else 0.0,
                 "elapsed_seconds": request_elapsed_s,
                 "estimated": True,
@@ -1335,105 +1355,6 @@ def select_code_change_tool(tools_dict: ToolsDict) -> Optional[str]:
     return write_tools[0] if write_tools else None
 
 
-def plan_tasks(args: Dict[str, Any]) -> str:
-    """Create/update/list tasks for task-branching mode."""
-    global TASK_MANAGER, TASKS_CAPTURE_MODE, TASKS_CAPTURED
-    data, err = _require_args_dict(args, "plan_tasks")
-    if err:
-        return err
-    if TASK_MANAGER is None:
-        TASK_MANAGER = TaskManager()
-
-    action = str(data.get("action") or "").strip().lower()
-    if not action:
-        return "error: missing required parameter 'action'"
-
-    if action == "create":
-        tasks = data.get("tasks") or []
-        if not isinstance(tasks, list):
-            return "error: 'tasks' must be an array"
-        if TASKS_CAPTURE_MODE:
-            temp_manager = TaskManager()
-            created = temp_manager.create_tasks(tasks)
-            TASKS_CAPTURED = [
-                {"id": t.task_id, "description": t.description}
-                for t in created
-            ]
-            if not created:
-                return "error: no valid tasks created (each task needs a description)"
-            return f"ok: captured {len(created)} task(s)"
-        created = TASK_MANAGER.create_tasks(tasks)
-        if not created:
-            return "error: no valid tasks created (each task needs a description)"
-        return f"ok: created {len(created)} task(s)"
-
-    if action == "update":
-        task_id = str(data.get("task_id") or "").strip()
-        if not task_id:
-            return "error: missing required parameter 'task_id' for update"
-        fields: Dict[str, Any] = {}
-        if data.get("status"):
-            fields["status"] = str(data.get("status"))
-        if "summary" in data:
-            fields["summary"] = data.get("summary")
-        if "files_changed" in data and isinstance(data.get("files_changed"), list):
-            fields["files_changed"] = data.get("files_changed")
-        if not fields:
-            return "error: no update fields provided"
-        task = TASK_MANAGER.update_task(task_id, **fields)
-        if not task:
-            return f"error: unknown task_id '{task_id}'"
-        return f"ok: updated {task_id}"
-
-    if action == "list":
-        tasks = TASK_MANAGER.list_tasks()
-        payload = [
-            {
-                "id": t.task_id,
-                "description": t.description,
-                "status": t.status,
-                "priority": t.priority,
-                "summary": t.summary,
-                "files_changed": list(t.files_changed),
-            }
-            for t in tasks
-        ]
-        return json.dumps(payload)
-
-    return f"error: invalid action '{action}' (expected create|update|list)"
-
-
-def flow_stage_done(args: Dict[str, Any]) -> str:
-    """Record completion of a flow stage and capture structured metadata."""
-    global FLOW_STAGE_SIGNAL, FLOW_STAGE_EXPECTED
-    data, err = _require_args_dict(args, "flow_stage_done")
-    if err:
-        return err
-    stage_raw = data.get("stage")
-    stage = str(stage_raw or "").strip().lower()
-    if not stage:
-        return "error: missing required parameter 'stage'"
-    payload = dict(data)
-    payload["stage"] = stage
-    FLOW_STAGE_SIGNAL = {
-        "stage": stage,
-        "payload": payload,
-    }
-    expected = str(FLOW_STAGE_EXPECTED or "").strip().lower()
-    if expected and stage != expected:
-        logging_hook.log_event("flow_stage_mismatch", {
-            "expected": expected,
-            "actual": stage,
-            "payload_preview": str(payload)[:200],
-        })
-        return f"ok: flow_stage_done recorded (expected {expected})"
-    logging_hook.log_event("flow_stage_done", {
-        "stage": stage,
-        "payload_preview": str(payload)[:200],
-    })
-    return "ok: flow_stage_done recorded"
-
-
 def finish_run(args: Dict[str, Any]) -> str:
     """Record a finish signal so the runtime can terminate cleanly."""
     global FINISH_SIGNAL
@@ -1441,9 +1362,36 @@ def finish_run(args: Dict[str, Any]) -> str:
     if err:
         return err
 
-    status = str(data.get("status") or "done").strip().lower()
-    if status not in {"done", "blocked", "incomplete"}:
-        return "error: invalid status for finish (expected done|blocked|incomplete)"
+    raw_status = str(data.get("status") or "").strip().lower()
+    if not raw_status:
+        status = "done"
+        normalized_note = ""
+    else:
+        status_map = {
+            "done": "done",
+            "complete": "done",
+            "completed": "done",
+            "finished": "done",
+            "success": "done",
+            "ok": "done",
+            "blocked": "blocked",
+            "block": "blocked",
+            "incomplete": "incomplete",
+            "partial": "incomplete",
+            "not_done": "incomplete",
+            "needs_work": "incomplete",
+        }
+        status = status_map.get(raw_status, "")
+        if not status:
+            if any(tok in raw_status for tok in ("done", "complete", "finish", "success")):
+                status = "done"
+            elif "block" in raw_status:
+                status = "blocked"
+            elif any(tok in raw_status for tok in ("incomplete", "partial", "todo", "remaining", "not done")):
+                status = "incomplete"
+            else:
+                status = "done"
+        normalized_note = "" if status == raw_status else f" (normalized from '{raw_status}')"
 
     summary_raw = data.get("summary")
     summary = ""
@@ -1458,210 +1406,11 @@ def finish_run(args: Dict[str, Any]) -> str:
     }
     logging_hook.log_event("finish_called", {
         "status": status,
+        "status_raw": raw_status or None,
+        "status_normalized": bool(normalized_note),
         "summary_preview": summary[:200],
     })
-    return f"ok: finish recorded ({status})"
-
-
-def think_tool(args: Dict[str, Any]) -> str:
-    """Record explicit reasoning with no side effects."""
-    data, err = _require_args_dict(args, "think")
-    if err:
-        return err
-
-    thought = data.get("thought")
-    if not isinstance(thought, str) or not thought.strip():
-        return "error: think requires non-empty string parameter 'thought'"
-
-    clean = thought.strip()
-    logging_hook.log_event("think_used", {
-        "chars": len(clean),
-        "preview": clean[:200],
-    })
-    return "ok: thought recorded"
-
-
-def _collect_parent_summary(messages: List[Dict[str, Any]], max_messages: int = 6, max_chars: int = 1200) -> str:
-    parts: List[str] = []
-    for msg in messages:
-        role = msg.get("role")
-        content = msg.get("content")
-        if role in ("user", "assistant") and content:
-            parts.append(f"{role}: {str(content)}")
-    if max_messages and len(parts) > max_messages:
-        parts = parts[-max_messages:]
-    summary = "\n".join(parts).strip()
-    if len(summary) > max_chars:
-        summary = summary[-max_chars:]
-    return summary
-
-
-def _extract_task_files(task_messages: List[Dict[str, Any]]) -> List[str]:
-    files = set()
-    for msg in task_messages:
-        if msg.get("role") != "assistant":
-            continue
-        for tc in msg.get("tool_calls") or []:
-            func = tc.get("function", {}) or {}
-            name = resolve_tool_name(func.get("name", ""))
-            if name not in ("write", "write_file", "edit", "replace_in_file", "apply_patch", "patch_files"):
-                continue
-            raw_args = func.get("arguments", "{}")
-            if isinstance(raw_args, dict):
-                args = raw_args
-            else:
-                try:
-                    args = json.loads(raw_args) if raw_args else {}
-                except json.JSONDecodeError:
-                    args = {}
-            if isinstance(args, dict):
-                path = args.get("path")
-                if isinstance(path, str) and path:
-                    files.add(path)
-                paths = args.get("paths")
-                if isinstance(paths, list):
-                    for p in paths:
-                        if isinstance(p, str) and p:
-                            files.add(p)
-                if name in ("apply_patch", "patch_files"):
-                    patch = args.get("patch")
-                    if isinstance(patch, str):
-                        patch_file = extract_patch_file(patch)
-                        if patch_file:
-                            files.add(patch_file)
-                    patches = args.get("patches")
-                    if isinstance(patches, list):
-                        for p in patches:
-                            if isinstance(p, str):
-                                patch_file = extract_patch_file(p)
-                                if patch_file:
-                                    files.add(patch_file)
-    return sorted(files)
-
-
-def _extract_task_reads(task_messages: List[Dict[str, Any]]) -> List[str]:
-    files = set()
-    for msg in task_messages:
-        if msg.get("role") != "assistant":
-            continue
-        for tc in msg.get("tool_calls") or []:
-            func = tc.get("function", {}) or {}
-            name = resolve_tool_name(func.get("name", ""))
-            if name not in ("read", "read_file", "read_files", "batch_read"):
-                continue
-            raw_args = func.get("arguments", "{}")
-            if isinstance(raw_args, dict):
-                args = raw_args
-            else:
-                try:
-                    args = json.loads(raw_args) if raw_args else {}
-                except json.JSONDecodeError:
-                    args = {}
-            if isinstance(args, dict):
-                path = args.get("path")
-                if isinstance(path, str) and path:
-                    files.add(path)
-                paths = args.get("paths")
-                if isinstance(paths, list):
-                    for p in paths:
-                        if isinstance(p, str) and p:
-                            files.add(p)
-    return sorted(files)
-
-
-def _extract_plan_steps(description: str) -> List[str]:
-    steps: List[str] = []
-    if not description:
-        return steps
-    for line in str(description).splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith(("- ", "* ")):
-            steps.append(stripped[2:].strip())
-            continue
-        if stripped[0].isdigit() and "." in stripped[:3]:
-            parts = stripped.split(".", 1)
-            if len(parts) == 2:
-                step = parts[1].strip()
-                if step:
-                    steps.append(step)
-    return steps
-
-
-_READONLY_TASK_RE = re.compile(
-    r"\b(read|review|inspect|analy[sz]e|examine|check|find|search|list|locate|open|"
-    r"summar(?:ize|ise)|document|scan|explore|understand|plan)\b"
-)
-_WRITE_TASK_RE = re.compile(
-    r"\b(write|edit|patch|change|modify|implement|fix|update|add|remove|delete|"
-    r"refactor|create|rewrite|rename|move)\b"
-)
-
-
-def _should_skip_task(description: str) -> bool:
-    if not description:
-        return False
-    text = str(description).lower()
-    if _WRITE_TASK_RE.search(text):
-        return False
-    return bool(_READONLY_TASK_RE.search(text))
-
-
-def _validate_task_report(report: Dict[str, Any]) -> List[str]:
-    errors: List[str] = []
-    required = {
-        "task_id": str,
-        "description": str,
-        "status": str,
-        "attempts": int,
-        "replan_max": int,
-        "files_changed": list,
-        "files_read": list,
-        "plan_steps": list,
-    }
-    optional = {
-        "tool_calls_total": int,
-        "tool_errors_total": int,
-        "tool_call_counts": dict,
-        "tool_error_counts": dict,
-        "analysis_retries": int,
-        "feedback_counts": dict,
-        "error": str,
-        "skip_reason": str,
-    }
-    for key, expected in required.items():
-        if key not in report:
-            errors.append(f"missing:{key}")
-            continue
-        value = report.get(key)
-        if not isinstance(value, expected):
-            errors.append(f"type:{key}")
-            continue
-        if expected is list:
-            if not all(isinstance(item, str) for item in value):
-                errors.append(f"type:{key}_items")
-    for key, expected in optional.items():
-        if key not in report:
-            continue
-        value = report.get(key)
-        if value is None:
-            continue
-        if not isinstance(value, expected):
-            errors.append(f"type:{key}")
-    return errors
-
-
-def _build_task_summary(task_id: str, description: str, status: str, content: str, files_changed: List[str]) -> str:
-    parts = [f"Task {task_id}: {description}", f"status={status}"]
-    if files_changed:
-        parts.append(f"files={', '.join(files_changed)}")
-    if content:
-        snippet = content.strip().replace("\n", " ")
-        if len(snippet) > 300:
-            snippet = snippet[:300].rstrip() + "..."
-        parts.append(f"notes={snippet}")
-    return " | ".join(parts)
+    return f"ok: finish recorded ({status}){normalized_note}"
 
 
 def _append_feedback(
@@ -1690,46 +1439,14 @@ def run_agent(
     previous_messages: Optional[List[Dict[str, Any]]] = None,
     task_depth: int = 0,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    global LAST_RUN_SUMMARY, CURRENT_MESSAGES, FINISH_SIGNAL
+    global LAST_RUN_SUMMARY, CURRENT_MESSAGES, FINISH_SIGNAL, LAST_REQUEST_SNAPSHOT
     LAST_RUN_SUMMARY = None
     FINISH_SIGNAL = None
+    LAST_REQUEST_SNAPSHOT = None
 
-    task_branching = bool(agent_settings.get("task_branching", False)) and task_depth == 0
-    task_flow_mode = str(agent_settings.get("task_flow_mode", "branched") or "branched").strip().lower()
-    task_plan_mode = str(agent_settings.get("task_plan_mode", "explore") or "explore").strip().lower()
-    task_skip_readonly = bool(agent_settings.get("task_skip_readonly", False))
-    task_output_mode = str(agent_settings.get("task_output_mode", "human") or "human").strip().lower()
-    benchmark_output_mode = str(agent_settings.get("benchmark_output_mode", "model") or "model").strip().lower()
-    flow_config = agent_settings.get("flow")
-    flow_enabled = bool(flow_config) and task_depth == 0
-    if flow_enabled:
-        task_branching = False
-    flow_stage_retries = int(agent_settings.get("flow_stage_retries", 0) or 0)
-    flow_stage_required = bool(agent_settings.get("flow_stage_required", True))
-    history_mode = str(agent_settings.get("history_mode", "full") or "full").strip().lower()
-    history_max_messages = int(agent_settings.get("history_max_messages", 0) or 0)
-    history_keep_first = bool(agent_settings.get("history_keep_first", False))
-    history_strip_thinking = bool(agent_settings.get("history_strip_thinking", False))
-    history_tool_truncate_chars = int(agent_settings.get("history_tool_truncate_chars", 0) or 0)
-    history_tool_truncate_keep_last = int(agent_settings.get("history_tool_truncate_keep_last", 0) or 0)
-    history_tool_call_args_truncate_chars = int(agent_settings.get("history_tool_call_args_truncate_chars", 0) or 0)
-    history_tool_call_args_keep_last = int(agent_settings.get("history_tool_call_args_keep_last", 0) or 0)
-    flow_retry_hints = bool(agent_settings.get("flow_retry_hints", True))
-    flow_context_window = int(agent_settings.get("flow_context_window", 6) or 0)
-    phase_control = agent_settings.get("phase_control") or {}
-    phase_log_mode = str(agent_settings.get("phase_log", "off") or "off").strip().lower()
-    if phase_log_mode in {"1", "true", "yes", "on"}:
-        phase_log_mode = "both"
-    elif phase_log_mode in {"0", "false", "no", "off", "none"}:
-        phase_log_mode = "off"
-    if phase_log_mode not in {"off", "stdout", "log", "both"}:
-        phase_log_mode = "off"
-    phase_log_stdout = phase_log_mode in {"stdout", "both"}
-    task_manager: Optional[TaskManager] = None
-    if task_branching:
-        global TASK_MANAGER
-        TASK_MANAGER = TaskManager()
-        task_manager = TASK_MANAGER
+    benchmark_output_mode = "model"
+    history_max_messages = max(0, int(agent_settings.get("history_max_messages", 0) or 0))
+    phase_log_mode = "off"
 
     # Install middleware hooks (idempotent — clears previous hooks first)
     hooks.clear()
@@ -1767,6 +1484,10 @@ def run_agent(
 
     request_overrides = agent_settings.get("request_overrides", {}) or {}
     base_tool_choice_required = is_tool_choice_required(request_overrides.get("tool_choice"))
+    native_thinking = bool(agent_settings.get("native_thinking", False))
+    thinking_visibility = str(agent_settings.get("thinking_visibility", "show") or "show").strip().lower()
+    if thinking_visibility not in {"show", "hidden"}:
+        thinking_visibility = "show"
 
     auto_tool_call_on_failure = bool(agent_settings.get("auto_tool_call_on_failure", False))
     auto_tool_calls_used = 0
@@ -1775,21 +1496,7 @@ def run_agent(
     code_change_made = False
     code_change_retries = 0
     forced_tool_choice: Optional[str] = None
-    write_nudge_sent = False
-    finish_nudge_sent = False
     consecutive_noop_turns = 0
-
-    progress_enabled = bool(agent_settings.get("progress_injection", False))
-    progress_max_tokens = int(agent_settings.get("progress_max_tokens", 48) or 48)
-    progress_reads: List[str] = []
-    progress_writes: Dict[str, int] = {}
-    progress_last_error = ""
-    progress_source_read = False
-    progress_spec_read = False
-    progress_last_path = ""
-    progress_non_write_streak = 0
-
-    native_thinking = bool(agent_settings.get("native_thinking", False))
 
     agent_max_turns = int(agent_settings.get("max_turns", MAX_TURNS) or MAX_TURNS)
 
@@ -1798,1218 +1505,19 @@ def run_agent(
     READ_ONLY_TOOLS = {"list_dir", "read_file", "read_files", "search_text", "find_files"}
     WRITE_TOOLS = {"write_file", "replace_in_file", "patch_files"}
 
-    def _progress_path_label(path: str) -> str:
-        if not path:
-            return ""
-        path = str(path).strip()
-        if not path:
-            return ""
-        base = os.path.basename(path)
-        return base or path
-
-    def _progress_remember_read(path: Optional[str]) -> None:
-        nonlocal progress_source_read, progress_spec_read
-        label = _progress_path_label(path or "")
-        if not label:
-            return
-        if label not in progress_reads:
-            progress_reads.append(label)
-            if len(progress_reads) > 8:
-                del progress_reads[0]
-        lower = label.lower()
-        if lower.endswith((".spec.js", ".test.js", "_test.js", ".spec.ts", ".test.ts")):
-            progress_spec_read = True
-        elif "." in lower:
-            progress_source_read = True
-
-    def _progress_remember_write(path: Optional[str]) -> None:
-        label = _progress_path_label(path or "")
-        if not label:
-            return
-        progress_writes[label] = progress_writes.get(label, 0) + 1
-
-    def _progress_next_action() -> str:
-        total_writes = sum(progress_writes.values())
-        if progress_non_write_streak >= 3:
-            if total_writes > 0:
-                return "stop read/think loop: make one targeted edit or call finish"
-            return "stop read/think loop: implement now with write/edit/apply_patch"
-
-        err = progress_last_error.lower()
-        if err:
-            if "unknown tool '" in err:
-                return "retry using one listed tool name exactly"
-            if "repeated no-op write" in err or "repeated no-op edit" in err:
-                target = _progress_path_label(progress_last_path) or "same file"
-                return f"read {target} with diff=true, then change strategy"
-            if "missing required parameter" in err:
-                return "retry same tool with required parameters"
-            if "old text was not found" in err or "old_string not found" in err:
-                return "read file and copy exact old snippet before edit"
-            return "adjust tool arguments based on the error and retry once"
-        if not progress_source_read:
-            return "read source file"
-        if not progress_spec_read:
-            return "read spec/test file"
-        if total_writes == 0:
-            return "implement using write/edit/apply_patch"
-        return "if complete call finish, otherwise make one targeted edit"
-
-    def _build_progress_message() -> Tuple[str, Dict[str, Any]]:
-        reads_text = ", ".join(progress_reads[-4:]) if progress_reads else "-"
-        writes_items = [f"{name} x{count}" for name, count in sorted(progress_writes.items())]
-        writes_text = ", ".join(writes_items[:4]) if writes_items else "-"
-        last_error_text = progress_last_error if progress_last_error else "-"
-        next_action = _progress_next_action()
-        raw = (
-            "STATE (informational): "
-            f"read=[{reads_text}] ; wrote=[{writes_text}] ; "
-            f"last_error=[{last_error_text}] ; next=[{next_action}]."
-        )
-        text = _truncate_words(raw, progress_max_tokens)
-        payload = {
-            "read_files_count": len(progress_reads),
-            "write_counts": dict(progress_writes),
-            "last_error": last_error_text,
-            "next_action": next_action,
-        }
-        return text, payload
-
-    def _filter_tools_for_stage(stage: str) -> ToolsDict:
-        stage = (stage or "").strip().lower()
-        if stage == "plan":
-            allowed = READ_ONLY_TOOLS | {"plan_tasks"}
-        elif stage == "context":
-            allowed = READ_ONLY_TOOLS
-        else:
-            allowed = READ_ONLY_TOOLS | WRITE_TOOLS
-        return {k: v for k, v in tools_dict.items() if k in allowed}
-
-    def _compact_stage_summary(content: str, files_read: List[str]) -> str:
-        parts: List[str] = []
-        if files_read:
-            parts.append(f"files_read: {', '.join(files_read[:8])}")
-        if content:
-            snippet = content.strip().replace("\n", " ")
-            if len(snippet) > 240:
-                snippet = snippet[:240].rstrip() + "..."
-            if snippet:
-                parts.append(f"notes: {snippet}")
-        return "\n".join(parts).strip()
-
     def _select_request_messages(all_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if history_mode in {"full", "all"} or history_max_messages <= 0:
-            selected = all_messages
-        else:
-            total = len(all_messages)
-            if total <= history_max_messages:
-                selected = all_messages
-            else:
-                if history_keep_first and all_messages:
-                    first = all_messages[0]
-                    tail = all_messages[-history_max_messages:]
-                    if first in tail:
-                        selected = tail
-                    else:
-                        selected = [first] + tail
-                else:
-                    selected = all_messages[-history_max_messages:]
-                if len(selected) < total:
-                    logging_hook.log_event("history_trim", {
-                        "history_mode": history_mode,
-                        "history_max_messages": history_max_messages,
-                        "history_keep_first": history_keep_first,
-                        "before": total,
-                        "after": len(selected),
-                    })
-        if not history_strip_thinking:
-            sanitized = list(selected)
-        else:
-            sanitized = []
-            for msg in selected:
-                if not isinstance(msg, dict):
-                    sanitized.append(msg)
-                    continue
-                if "thinking" not in msg and "reasoning_content" not in msg:
-                    sanitized.append(msg)
-                    continue
-                cleaned = dict(msg)
-                cleaned.pop("thinking", None)
-                cleaned.pop("reasoning_content", None)
-                sanitized.append(cleaned)
-            if len(sanitized) != len(selected):
-                logging_hook.log_event("history_strip_thinking", {
-                    "removed": len(selected) - len(sanitized),
-                })
-        if history_tool_call_args_truncate_chars > 0:
-            assistant_indices = [
-                i for i, msg in enumerate(sanitized)
-                if isinstance(msg, dict)
-                and msg.get("role") == "assistant"
-                and isinstance(msg.get("tool_calls"), list)
-                and msg.get("tool_calls")
-            ]
-            protected_assistant = set()
-            if history_tool_call_args_keep_last > 0 and assistant_indices:
-                protected_assistant = set(assistant_indices[-history_tool_call_args_keep_last:])
-
-            def _truncate_arg_value(value: Any) -> Any:
-                if isinstance(value, str):
-                    if len(value) <= history_tool_call_args_truncate_chars:
-                        return value
-                    snippet = value[:history_tool_call_args_truncate_chars].rstrip()
-                    return f"{snippet}\n...[truncated {len(value) - len(snippet)} chars]"
-                if isinstance(value, list):
-                    return [_truncate_arg_value(v) for v in value]
-                if isinstance(value, dict):
-                    return {k: _truncate_arg_value(v) for k, v in value.items()}
-                return value
-
-            compacted_messages: List[Dict[str, Any]] = []
-            for idx, msg in enumerate(sanitized):
-                if idx not in assistant_indices or idx in protected_assistant:
-                    compacted_messages.append(msg)
-                    continue
-
-                tool_calls = msg.get("tool_calls")
-                if not isinstance(tool_calls, list):
-                    compacted_messages.append(msg)
-                    continue
-
-                changed = False
-                new_tool_calls: List[Dict[str, Any]] = []
-                for tc in tool_calls:
-                    if not isinstance(tc, dict):
-                        new_tool_calls.append(tc)
-                        continue
-                    tc_new = dict(tc)
-                    fn = tc_new.get("function")
-                    if not isinstance(fn, dict):
-                        new_tool_calls.append(tc_new)
-                        continue
-                    fn_new = dict(fn)
-                    arg_raw = fn_new.get("arguments")
-                    if isinstance(arg_raw, str) and len(arg_raw) > history_tool_call_args_truncate_chars:
-                        before_len = len(arg_raw)
-                        try:
-                            parsed = json.loads(arg_raw)
-                        except Exception:
-                            snippet = arg_raw[:history_tool_call_args_truncate_chars].rstrip()
-                            fn_new["arguments"] = json.dumps({
-                                "_truncated": True,
-                                "_chars": before_len,
-                                "_preview": snippet,
-                            }, ensure_ascii=False)
-                        else:
-                            compact = _truncate_arg_value(parsed)
-                            fn_new["arguments"] = json.dumps(compact, ensure_ascii=False)
-                        after_len = len(str(fn_new.get("arguments") or ""))
-                        changed = True
-                        logging_hook.log_event("history_tool_call_truncate", {
-                            "chars_before": before_len,
-                            "chars_after": after_len,
-                        })
-                    tc_new["function"] = fn_new
-                    new_tool_calls.append(tc_new)
-
-                if changed:
-                    new_msg = dict(msg)
-                    new_msg["tool_calls"] = new_tool_calls
-                    compacted_messages.append(new_msg)
-                else:
-                    compacted_messages.append(msg)
-            sanitized = compacted_messages
-        if history_tool_truncate_chars <= 0:
-            return sanitized
-        tool_indices = [i for i, msg in enumerate(sanitized) if isinstance(msg, dict) and msg.get("role") == "tool" and isinstance(msg.get("content"), str)]
-        protected = set()
-        if history_tool_truncate_keep_last > 0 and tool_indices:
-            protected = set(tool_indices[-history_tool_truncate_keep_last:])
-        truncated = []
-        for idx, msg in enumerate(sanitized):
-            if idx not in tool_indices or idx in protected:
-                truncated.append(msg)
-                continue
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, str) or len(content) <= history_tool_truncate_chars:
-                truncated.append(msg)
-                continue
-            new_msg = dict(msg)
-            snippet = content[:history_tool_truncate_chars].rstrip()
-            new_msg["content"] = f"{snippet}\n...[truncated {len(content) - len(snippet)} chars]"
-            truncated.append(new_msg)
-            logging_hook.log_event("history_tool_truncate", {
-                "chars_before": len(content),
-                "chars_after": len(new_msg.get("content") or ""),
-            })
-        return truncated
-
-    phase_enabled = False
-    phase_state = ""
-    phase_signals = {
-        "files_read": set(),
-        "files_changed": set(),
-        "read_tools": 0,
-        "write_tools": 0,
-        "plan_tools": 0,
-        "code_change": False,
-        "plan_detected": False,
-    }
-    phase_cfg = {}
-    phase_rules = {}
-    phase_prompts = {}
-    phase_states: List[str] = []
-    phase_mode = "off"
-    phase_last_probe: Optional[Dict[str, Any]] = None
-
-    if phase_control and task_depth == 0 and not flow_enabled and not task_branching and task_flow_mode != "staged3":
-        phase_cfg = phase_control if isinstance(phase_control, dict) else {}
-        phase_mode = str(phase_cfg.get("mode") or "off").strip().lower()
-        phase_states = [str(s).strip().lower() for s in (phase_cfg.get("states") or ["context", "plan", "implement"]) if str(s).strip()]
-        if not phase_states:
-            phase_states = ["context", "plan", "implement"]
-        phase_state = str(phase_cfg.get("default") or phase_states[0]).strip().lower()
-        if phase_state not in phase_states:
-            phase_state = phase_states[0]
-        phase_rules = phase_cfg.get("rules") if isinstance(phase_cfg.get("rules"), dict) else {}
-        phase_prompts = phase_cfg.get("prompts") if isinstance(phase_cfg.get("prompts"), dict) else {}
-        phase_enabled = phase_mode in {"rules", "llm", "hybrid"}
-
-    def _phase_from_rules(current: str) -> str:
-        if not phase_enabled or phase_mode not in {"rules", "hybrid"}:
-            return current
-        min_files = int(phase_rules.get("min_files_read_for_plan", 1) or 0)
-        auto_plan = bool(phase_rules.get("auto_plan_after_read", True))
-        write_to_implement = bool(phase_rules.get("write_to_implement", True))
-        if write_to_implement and (phase_signals["write_tools"] > 0 or phase_signals["code_change"]):
-            return "implement"
-        if phase_signals["plan_tools"] > 0 or phase_signals["plan_detected"]:
-            return "plan"
-        if auto_plan and current == "context" and len(phase_signals["files_read"]) >= min_files:
-            return "plan"
-        return current
-
-    def _parse_phase_json(text: str) -> Optional[Dict[str, Any]]:
-        if not text:
-            return None
-        raw = text.strip()
-        try:
-            data = json.loads(raw)
-            return data if isinstance(data, dict) else None
-        except json.JSONDecodeError:
-            pass
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            snippet = raw[start:end + 1]
-            try:
-                data = json.loads(snippet)
-                return data if isinstance(data, dict) else None
-            except json.JSONDecodeError:
-                return None
-        return None
-
-    def _phase_probe_llm(current: str, turn: int, tool_names: List[str]) -> Optional[Dict[str, Any]]:
-        if not phase_enabled or phase_mode not in {"llm", "hybrid"}:
-            return None
-        probe_cfg = phase_cfg.get("probe") if isinstance(phase_cfg.get("probe"), dict) else {}
-        if probe_cfg is False:
-            return None
-        temp = probe_cfg.get("temperature", 0)
-        max_tokens = int(probe_cfg.get("max_tokens", 128) or 128)
-        system_text = probe_cfg.get("system_prompt") or (
-            "You are a classifier. Return JSON only with keys: phase, confidence. "
-            f"Valid phases: {', '.join(phase_states)}."
-        )
-        user_text = probe_cfg.get("user_prompt")
-        if not user_text:
-            user_text = (
-                "Classify the current phase.\n"
-                f"prev_phase: {current}\n"
-                f"read_tools: {phase_signals['read_tools']}\n"
-                f"write_tools: {phase_signals['write_tools']}\n"
-                f"plan_tools: {phase_signals['plan_tools']}\n"
-                f"files_read: {len(phase_signals['files_read'])}\n"
-                f"files_changed: {len(phase_signals['files_changed'])}\n"
-                f"code_change: {phase_signals['code_change']}\n"
-                f"plan_detected: {phase_signals['plan_detected']}\n"
-                f"turn: {turn}\n"
-                f"tools_used: {', '.join([t for t in tool_names if t])}\n"
-            )
-        probe_overrides = {
-            "temperature": temp,
-            "max_tokens": max_tokens,
-            "think": False,
-        }
-        response = call_api(
-            [{"role": "user", "content": user_text}],
-            system_text,
-            {},
-            probe_overrides,
-        )
-        if response.get("error"):
-            logging_hook.log_event("phase_probe_error", {"turn": turn, "error": response["error"]})
-            if phase_log_stdout:
-                _print_phase_event("probe_error", {"turn": turn, "error": response["error"]})
-            return None
-        choice = (response.get("choices") or [{}])[0]
-        msg = choice.get("message", {}) or {}
-        content = msg.get("content", "") or ""
-        parsed = _parse_phase_json(content)
-        if not parsed:
-            logging_hook.log_event("phase_probe_parse_error", {"turn": turn, "raw": content[:200]})
-            if phase_log_stdout:
-                _print_phase_event("probe_parse_error", {"turn": turn, "error": "parse_error"})
-            return None
-        return parsed
-
-    def _phase_update(current: str, turn: int, tool_names: List[str]) -> str:
-        new_phase = _phase_from_rules(current)
-        if phase_mode == "hybrid" and new_phase == current:
-            probe = _phase_probe_llm(current, turn, tool_names)
-            if isinstance(probe, dict):
-                phase = str(probe.get("phase") or "").strip().lower()
-                if phase in phase_states:
-                    return phase
-        if phase_mode == "llm":
-            probe = _phase_probe_llm(current, turn, tool_names)
-            if isinstance(probe, dict):
-                phase = str(probe.get("phase") or "").strip().lower()
-                if phase in phase_states:
-                    return phase
-        return new_phase
-
-    def _normalize_flow_stages(raw_flow: Any) -> List[Dict[str, Any]]:
-        stages: List[Dict[str, Any]] = []
-        if not isinstance(raw_flow, list):
-            return stages
-        for idx, item in enumerate(raw_flow, start=1):
-            if isinstance(item, str):
-                label = item.strip()
-                stage_id = label.lower().replace(" ", "_") if label else f"stage_{idx}"
-                default_require_change = stage_id in {"implement", "implementation", "execute", "edit", "build"}
-                stages.append({
-                    "id": stage_id,
-                    "label": label or stage_id,
-                    "prompt": "",
-                    "done_hint": "",
-                    "require_code_change": default_require_change,
-                    "raw": item,
-                })
-                continue
-            if isinstance(item, dict):
-                raw_id = item.get("id") or item.get("stage") or item.get("name") or f"stage_{idx}"
-                stage_id = str(raw_id).strip().lower() if raw_id else f"stage_{idx}"
-                label = str(item.get("label") or item.get("name") or item.get("id") or stage_id).strip()
-                prompt_text = str(item.get("prompt") or item.get("instructions") or "").strip()
-                done_hint = str(item.get("done_hint") or item.get("done_prompt") or "").strip()
-                require_change = item.get("require_code_change")
-                if require_change is None:
-                    require_change = stage_id in {"implement", "implementation", "execute", "edit", "build"}
-                stages.append({
-                    "id": stage_id or f"stage_{idx}",
-                    "label": label or stage_id,
-                    "prompt": prompt_text,
-                    "done_hint": done_hint,
-                    "require_code_change": bool(require_change),
-                    "history_mode": item.get("history_mode"),
-                    "history_max_messages": item.get("history_max_messages"),
-                    "history_keep_first": item.get("history_keep_first"),
-                    "history_strip_thinking": item.get("history_strip_thinking"),
-                    "history_tool_truncate_chars": item.get("history_tool_truncate_chars"),
-                    "history_tool_truncate_keep_last": item.get("history_tool_truncate_keep_last"),
-                    "context_window": item.get("context_window"),
-                    "tools_allow": item.get("tools_allow") or item.get("tool_allow"),
-                    "tools_block": item.get("tools_block") or item.get("tool_block"),
-                    "require_files_read": item.get("require_files_read"),
-                    "require_non_flow_tool": item.get("require_non_flow_tool"),
-                    "allow_missing_done": item.get("allow_missing_done"),
-                    "raw": item,
-                })
-        return stages
-
-    def _format_flow_context(notes: List[str], window: int) -> str:
-        if not notes or window == 0:
-            return ""
-        if window < 0:
-            window = len(notes)
-        tail = notes[-window:] if len(notes) > window else notes
-        return "\n".join(tail).strip()
-
-    def _build_flow_stage_note(
-        stage_label: str,
-        content: str,
-        files_read: List[str],
-        files_changed: List[str],
-        signal: Optional[Dict[str, Any]],
-    ) -> Tuple[str, Dict[str, Any]]:
-        payload = signal.get("payload") if isinstance(signal, dict) else {}
-        summary = ""
-        if isinstance(payload, dict):
-            raw_summary = payload.get("summary")
-            summary = str(raw_summary).strip() if raw_summary else ""
-        decisions = payload.get("decisions") if isinstance(payload, dict) else None
-        next_actions = payload.get("next_actions") if isinstance(payload, dict) else None
-        risks = payload.get("risks") if isinstance(payload, dict) else None
-
-        parts: List[str] = []
-        if summary:
-            parts.append(summary)
-        if isinstance(decisions, list) and decisions:
-            parts.append("decisions: " + "; ".join(str(d).strip() for d in decisions[:3] if str(d).strip()))
-        if isinstance(next_actions, list) and next_actions:
-            parts.append("next: " + "; ".join(str(a).strip() for a in next_actions[:3] if str(a).strip()))
-        if isinstance(risks, list) and risks:
-            parts.append("risks: " + "; ".join(str(r).strip() for r in risks[:2] if str(r).strip()))
-        if not parts:
-            compact = _compact_stage_summary(content, files_read)
-            if compact:
-                parts.append(compact)
-        if files_changed:
-            parts.append("changed: " + ", ".join(files_changed[:6]))
-
-        note = f"{stage_label}: " + " | ".join(parts) if parts else f"{stage_label}: done"
-        meta = payload if isinstance(payload, dict) else {}
-        return note.strip(), meta
-
-    def _stage_made_change(messages_in: List[Dict[str, Any]]) -> bool:
-        for msg in messages_in:
-            if msg.get("role") != "tool":
-                continue
-            tool_name = resolve_tool_name(msg.get("name", ""))
-            if not is_write_tool(tool_name):
-                continue
-            content = msg.get("content") or ""
-            if _did_tool_make_change(tool_name, content):
-                return True
-        return False
-
-    def _build_flow_retry_hint(
-        stage_id: str,
-        used_write: bool,
-        made_change: bool,
-        sub_summary: Optional[Dict[str, Any]],
-    ) -> str:
-        hints: List[str] = []
-        tool_errors = (sub_summary or {}).get("tool_error_counts") or {}
-        tool_errors_total = (sub_summary or {}).get("tool_errors_total") or 0
-        if stage_id == "implement":
-            if not used_write:
-                hints.append("Stop exploring. You must modify files now (patch_files/replace_in_file/write_file).")
-            elif used_write and not made_change:
-                hints.append("Your edits made no changes. Re-read the target file and apply a concrete change.")
-            if tool_errors.get("apply_patch") or tool_errors.get("patch_files"):
-                hints.append("Patch failed. Re-read the file and use replace_in_file or write_file as fallback.")
-        else:
-            if used_write:
-                hints.append("Do not modify files in this stage. Only read/analyze.")
-        if tool_errors_total:
-            hints.append("Fix tool errors before continuing.")
-        return " ".join(hints).strip()
-
-    def _execute_task_branches() -> Optional[Tuple[str, List[Dict[str, Any]]]]:
-        global TASK_MANAGER, LAST_RUN_SUMMARY, CURRENT_MESSAGES, TASK_ID, TASK_INDEX, TASK_TOTAL
-        if not task_branching or not task_manager:
-            return None
-        parent_summary = _collect_parent_summary(messages)
-        task_context_notes: List[str] = []
-        replan_max = int(agent_settings.get("task_replan_max", 0) or 0)
-        summaries: List[str] = []
-        tasks_list = task_manager.list_tasks()
-        for idx, task in enumerate(tasks_list, start=1):
-            task_context = parent_summary
-            if task_context_notes:
-                task_context = (
-                    f"{task_context}\n\nTASK CONTEXT:\n"
-                    + "\n".join(task_context_notes[-6:])
-                ).strip()
-            saved_task_id = TASK_ID
-            saved_task_index = TASK_INDEX
-            saved_task_total = TASK_TOTAL
-            TASK_ID = task.task_id
-            TASK_INDEX = idx
-            TASK_TOTAL = len(tasks_list)
-            attempt = 0
-            content = ""
-            task_messages: List[Dict[str, Any]] = []
-            status = "failed"
-            sub_summary: Dict[str, Any] = {}
-            try:
-                if task_skip_readonly and _should_skip_task(task.description):
-                    task_manager.start_task(task.task_id)
-                    status = "skipped"
-                    files_changed: List[str] = []
-                    files_read: List[str] = []
-                    plan_steps = _extract_plan_steps(task.description)
-                    report: Dict[str, Any] = {
-                        "task_id": task.task_id,
-                        "status": status,
-                        "description": task.description,
-                        "attempts": 0,
-                        "replan_max": replan_max,
-                        "files_changed": files_changed,
-                        "files_read": files_read,
-                        "plan_steps": plan_steps,
-                        "skip_reason": "read_only",
-                    }
-                    report_errors = _validate_task_report(report)
-                    if report_errors:
-                        logging_hook.log_event("task_report_invalid", {
-                            "task_id": task.task_id,
-                            "errors": report_errors,
-                            "status": status,
-                        })
-                    logging_hook.log_event("task_report", report)
-                    context_line = f"{task.task_id}: status={status}; skip_reason=read_only"
-                    if plan_steps:
-                        context_line += f"; plan_steps={len(plan_steps)}"
-                    task_context_notes.append(context_line)
-                    summary = _build_task_summary(
-                        task.task_id,
-                        task.description,
-                        status,
-                        "skipped read-only task",
-                        files_changed,
-                    )
-                    task_manager.end_task(
-                        task.task_id,
-                        status=status,
-                        summary=summary,
-                        files_changed=files_changed,
-                        files_read=files_read,
-                    )
-                    summaries.append(summary)
-                    if task_output_mode == "human":
-                        messages.append({"role": "system", "content": f"[TASK SUMMARY] {summary}"})
-                    continue
-                task_manager.start_task(task.task_id)
-                while True:
-                    task_prompt = f"[TASK {task.task_id}] {task.description}"
-                    if attempt > 0:
-                        task_prompt = (
-                            f"{task_prompt}\n\nREPLAN attempt {attempt}/{replan_max}: "
-                            f"previous attempt failed with: {content}"
-                        )
-                    if task_context:
-                        task_prompt = f"{task_prompt}\n\nCONTEXT:\n{task_context}"
-                    sub_settings = dict(agent_settings)
-                    sub_settings["task_branching"] = False
-                    sub_tools = {k: v for k, v in tools_dict.items() if k != "plan_tasks"}
-                    saved_hooks = {ev: list(cbs) for ev, cbs in hooks._hooks.items()}
-                    saved_current_messages = CURRENT_MESSAGES
-                    content, task_messages = run_agent(
-                        task_prompt,
-                        system_prompt,
-                        sub_tools,
-                        sub_settings,
-                        previous_messages=None,
-                        task_depth=task_depth + 1,
-                    )
-                    if isinstance(LAST_RUN_SUMMARY, dict):
-                        sub_summary = dict(LAST_RUN_SUMMARY)
-                    hooks._hooks = saved_hooks
-                    CURRENT_MESSAGES = saved_current_messages
-                    status = "failed" if str(content).startswith("error:") else "completed"
-                    if status == "completed" or attempt >= replan_max:
-                        break
-                    attempt += 1
-            finally:
-                TASK_ID = saved_task_id
-                TASK_INDEX = saved_task_index
-                TASK_TOTAL = saved_task_total
-            files_changed = _extract_task_files(task_messages)
-            files_read = _extract_task_reads(task_messages)
-            plan_steps = _extract_plan_steps(task.description)
-            attempts_used = attempt + 1
-            report: Dict[str, Any] = {
-                "task_id": task.task_id,
-                "status": status,
-                "description": task.description,
-                "attempts": attempts_used,
-                "replan_max": replan_max,
-                "files_changed": files_changed,
-                "files_read": files_read,
-                "plan_steps": plan_steps,
-            }
-            if sub_summary:
-                report.update({
-                    "tool_calls_total": sub_summary.get("tool_calls_total"),
-                    "tool_errors_total": sub_summary.get("tool_errors_total"),
-                    "tool_call_counts": sub_summary.get("tool_call_counts"),
-                    "tool_error_counts": sub_summary.get("tool_error_counts"),
-                    "analysis_retries": sub_summary.get("analysis_retries"),
-                    "feedback_counts": sub_summary.get("feedback_counts"),
-                })
-            if status != "completed":
-                report["error"] = (content or "")[:200]
-            report_errors = _validate_task_report(report)
-            if report_errors:
-                logging_hook.log_event("task_report_invalid", {
-                    "task_id": task.task_id,
-                    "errors": report_errors,
-                    "status": status,
-                })
-            logging_hook.log_event("task_report", report)
-            context_line = f"{task.task_id}: status={status}"
-            if files_read:
-                context_line += f"; read={', '.join(files_read)}"
-            if files_changed:
-                context_line += f"; changed={', '.join(files_changed)}"
-            if plan_steps:
-                context_line += f"; plan_steps={len(plan_steps)}"
-            task_context_notes.append(context_line)
-            summary = _build_task_summary(
-                task.task_id,
-                task.description,
-                status,
-                content or "",
-                files_changed,
-            )
-            task_manager.end_task(
-                task.task_id,
-                status=status,
-                summary=summary,
-                files_changed=files_changed,
-                files_read=files_read,
-                error=(content if status == "failed" else None),
-            )
-            summaries.append(summary)
-            if task_output_mode == "human":
-                messages.append({"role": "system", "content": f"[TASK SUMMARY] {summary}"})
-        TASK_MANAGER = None
-        if task_output_mode == "runtime":
-            if _is_benchmark_mode():
-                final_content = _benchmark_final_output(CONTINUE_SESSION)
-            else:
-                final_content = "ok: completed"
-        else:
-            final_content = "\n".join(summaries) if summaries else "ok: no tasks executed"
-        if _is_benchmark_mode() and benchmark_output_mode == "runtime":
-            final_content = _benchmark_final_output(CONTINUE_SESSION)
-        if final_content:
-            hooks.emit("response_content", {"content": final_content, "turn": turns})
-        messages.append({"role": "assistant", "content": final_content})
-        summary = _metrics.summary()
-        LAST_RUN_SUMMARY = summary
-        logging_hook.log_event("agent_done", {"turns": turns, **summary, "message_summary": summarize_messages(messages)})
-        end_data = hooks.emit("agent_end", {
-            "summary": summary,
-            "messages": messages,
-            "content": final_content,
-            "turns": turns,
-            "log_path": logging_hook.get_log_path(),
-            "system_prompt": system_prompt,
-            "phase_log_mode": phase_log_mode,
+        if history_max_messages <= 0:
+            return list(all_messages)
+        total = len(all_messages)
+        if total <= history_max_messages:
+            return list(all_messages)
+        selected = list(all_messages[-history_max_messages:])
+        logging_hook.log_event("history_trim", {
+            "history_max_messages": history_max_messages,
+            "before": total,
+            "after": len(selected),
         })
-        dump_info = end_data.get("conversation_dump")
-        if dump_info:
-            logging_hook.log_event("conversation_saved", dump_info)
-        return final_content, messages
-
-    def _execute_flow() -> Optional[Tuple[str, List[Dict[str, Any]]]]:
-        global LAST_RUN_SUMMARY, CURRENT_MESSAGES, FLOW_STAGE_SIGNAL, FLOW_STAGE_EXPECTED, TASK_ID, TASK_INDEX, TASK_TOTAL
-        if not flow_enabled:
-            return None
-
-        stages = _normalize_flow_stages(flow_config)
-        if not stages:
-            return None
-        if "flow_stage_done" not in tools_dict:
-            final_content = "error: flow_stage_done tool unavailable"
-            messages.append({"role": "assistant", "content": final_content})
-            summary = _metrics.summary()
-            LAST_RUN_SUMMARY = summary
-            logging_hook.log_event("agent_done", {"turns": turns, **summary, "message_summary": summarize_messages(messages)})
-            end_data = hooks.emit("agent_end", {
-                "summary": summary,
-                "messages": messages,
-                "content": final_content,
-                "turns": turns,
-                "log_path": logging_hook.get_log_path(),
-                "system_prompt": system_prompt,
-                "phase_log_mode": phase_log_mode,
-            })
-            dump_info = end_data.get("conversation_dump")
-            if dump_info:
-                logging_hook.log_event("conversation_saved", dump_info)
-            return final_content, messages
-
-        flow_context_notes: List[str] = []
-        flow_reports: List[Dict[str, Any]] = []
-
-        for idx, stage in enumerate(stages, start=1):
-            stage_id = str(stage.get("id") or f"stage_{idx}").strip().lower()
-            stage_label = str(stage.get("label") or stage_id).strip() or stage_id
-            stage_prompt_text = str(stage.get("prompt") or "").strip()
-            done_hint = str(stage.get("done_hint") or "").strip()
-            require_change = bool(stage.get("require_code_change", False))
-            stage_context_window = stage.get("context_window")
-            stage_tools_allow = stage.get("tools_allow")
-            stage_tools_block = stage.get("tools_block")
-            stage_require_files_read = stage.get("require_files_read")
-            stage_require_non_flow_tool = stage.get("require_non_flow_tool")
-            stage_allow_missing_done = stage.get("allow_missing_done")
-
-            saved_task_id = TASK_ID
-            saved_task_index = TASK_INDEX
-            saved_task_total = TASK_TOTAL
-            TASK_ID = stage_id
-            TASK_INDEX = idx
-            TASK_TOTAL = len(stages)
-
-            attempt = 0
-            content = ""
-            stage_messages: List[Dict[str, Any]] = []
-            status = "failed"
-            sub_summary: Dict[str, Any] = {}
-            stage_signal: Optional[Dict[str, Any]] = None
-            retry_hint = ""
-            try:
-                while True:
-                    FLOW_STAGE_SIGNAL = None
-                    FLOW_STAGE_EXPECTED = stage_id
-
-                    stage_prompt = (
-                        f"[FLOW STAGE: {stage_label.upper()}]\n"
-                        f"TASK:\n{prompt}\n"
-                    )
-                    if stage_prompt_text:
-                        stage_prompt += f"\nSTAGE INSTRUCTIONS:\n{stage_prompt_text}\n"
-                    context_window = flow_context_window if stage_context_window is None else int(stage_context_window or 0)
-                    context_block = _format_flow_context(flow_context_notes, context_window)
-                    if context_block:
-                        stage_prompt += f"\nFLOW CONTEXT:\n{context_block}\n"
-
-                    stage_prompt += (
-                        "\nWhen this stage is complete, call flow_stage_done(stage=..., summary=..., "
-                        "decisions=[...], next_actions=[...], files_read=[...], files_changed=[...], metadata={...}).\n"
-                        "Keep any final text brief.\n"
-                    )
-                    if done_hint:
-                        stage_prompt += f"\nDONE HINT:\n{done_hint}\n"
-                    if attempt > 0:
-                        stage_prompt += (
-                            f"\nRETRY {attempt}/{flow_stage_retries}: "
-                            "previous run did not call flow_stage_done. "
-                            "You must call flow_stage_done to advance.\n"
-                        )
-                        if retry_hint:
-                            stage_prompt += f"\nRETRY GUIDANCE:\n{retry_hint}\n"
-
-                    sub_settings = dict(agent_settings)
-                    sub_settings["task_branching"] = False
-                    sub_settings["flow"] = None
-                    sub_settings["require_code_change"] = require_change
-                    sub_settings["min_tool_calls"] = max(1, int(sub_settings.get("min_tool_calls", 0) or 0))
-                    flow_history_mode = agent_settings.get("flow_history_mode")
-                    flow_history_max = agent_settings.get("flow_history_max_messages")
-                    flow_history_keep = agent_settings.get("flow_history_keep_first")
-                    flow_history_strip = agent_settings.get("flow_history_strip_thinking")
-                    flow_history_trunc = agent_settings.get("flow_history_tool_truncate_chars")
-                    flow_history_trunc_keep = agent_settings.get("flow_history_tool_truncate_keep_last")
-                    if flow_history_mode is None:
-                        flow_history_mode = agent_settings.get("history_mode", "full")
-                    if flow_history_max is None:
-                        flow_history_max = agent_settings.get("history_max_messages", 0)
-                    if flow_history_keep is None:
-                        flow_history_keep = agent_settings.get("history_keep_first", False)
-                    if flow_history_strip is None:
-                        flow_history_strip = agent_settings.get("history_strip_thinking", False)
-                    if flow_history_trunc is None:
-                        flow_history_trunc = agent_settings.get("history_tool_truncate_chars", 0)
-                    if flow_history_trunc_keep is None:
-                        flow_history_trunc_keep = agent_settings.get("history_tool_truncate_keep_last", 0)
-                    stage_history_mode = stage.get("history_mode")
-                    stage_history_max = stage.get("history_max_messages")
-                    stage_history_keep = stage.get("history_keep_first")
-                    stage_history_strip = stage.get("history_strip_thinking")
-                    stage_history_trunc = stage.get("history_tool_truncate_chars")
-                    stage_history_trunc_keep = stage.get("history_tool_truncate_keep_last")
-                    if stage_history_mode is not None:
-                        flow_history_mode = str(stage_history_mode).strip().lower()
-                    if stage_history_max is not None:
-                        flow_history_max = int(stage_history_max or 0)
-                    if stage_history_keep is not None:
-                        flow_history_keep = bool(stage_history_keep)
-                    if stage_history_strip is not None:
-                        flow_history_strip = bool(stage_history_strip)
-                    if stage_history_trunc is not None:
-                        flow_history_trunc = int(stage_history_trunc or 0)
-                    if stage_history_trunc_keep is not None:
-                        flow_history_trunc_keep = int(stage_history_trunc_keep or 0)
-                    sub_settings["history_mode"] = flow_history_mode
-                    sub_settings["history_max_messages"] = flow_history_max
-                    sub_settings["history_keep_first"] = flow_history_keep
-                    sub_settings["history_strip_thinking"] = flow_history_strip
-                    sub_settings["history_tool_truncate_chars"] = flow_history_trunc
-                    sub_settings["history_tool_truncate_keep_last"] = flow_history_trunc_keep
-
-                    stage_tools = tools_dict
-                    if isinstance(stage_tools_allow, (list, tuple, set)):
-                        allow_set = {resolve_tool_name(str(name).strip()) for name in stage_tools_allow if str(name).strip()}
-                        if not stage_allow_missing_done and "flow_stage_done" in tools_dict:
-                            allow_set.add("flow_stage_done")
-                        stage_tools = {name: tool for name, tool in tools_dict.items() if name in allow_set}
-                    if isinstance(stage_tools_block, (list, tuple, set)) and stage_tools:
-                        block_set = {resolve_tool_name(str(name).strip()) for name in stage_tools_block if str(name).strip()}
-                        stage_tools = {name: tool for name, tool in stage_tools.items() if name not in block_set}
-                    if not stage_allow_missing_done and "flow_stage_done" in tools_dict and "flow_stage_done" not in stage_tools:
-                        stage_tools["flow_stage_done"] = tools_dict["flow_stage_done"]
-                    saved_hooks = {ev: list(cbs) for ev, cbs in hooks._hooks.items()}
-                    saved_current_messages = CURRENT_MESSAGES
-                    content, stage_messages = run_agent(
-                        stage_prompt,
-                        system_prompt,
-                        stage_tools,
-                        sub_settings,
-                        previous_messages=None,
-                        task_depth=task_depth + 1,
-                    )
-                    if isinstance(LAST_RUN_SUMMARY, dict):
-                        sub_summary = dict(LAST_RUN_SUMMARY)
-                    hooks._hooks = saved_hooks
-                    CURRENT_MESSAGES = saved_current_messages
-                    FLOW_STAGE_EXPECTED = None
-
-                    stage_signal = FLOW_STAGE_SIGNAL if isinstance(FLOW_STAGE_SIGNAL, dict) else None
-                    status = "completed" if stage_signal else "failed"
-                    if stage_signal and str(stage_signal.get("stage") or "").strip().lower() != stage_id:
-                        status = "failed"
-                        stage_signal = None
-                    stage_non_flow_tools = 0
-                    for msg in stage_messages:
-                        if msg.get("role") != "assistant":
-                            continue
-                        for tc in msg.get("tool_calls") or []:
-                            func = tc.get("function", {}) or {}
-                            tool_name = resolve_tool_name(func.get("name", ""))
-                            if tool_name and tool_name != "flow_stage_done":
-                                stage_non_flow_tools += 1
-                    stage_files_read = _extract_task_reads(stage_messages)
-                    missing_hint = ""
-                    if stage_require_non_flow_tool is not None and stage_non_flow_tools < int(stage_require_non_flow_tool or 0):
-                        status = "failed"
-                        if stage_signal:
-                            stage_signal = None
-                        missing_hint = "Use at least one non-flow tool before calling flow_stage_done."
-                    if stage_require_files_read is not None and len(stage_files_read) < int(stage_require_files_read or 0):
-                        status = "failed"
-                        if stage_signal:
-                            stage_signal = None
-                        missing_hint = "Read at least one file before calling flow_stage_done."
-                    if not stage_signal and stage_allow_missing_done:
-                        require_non_flow = stage_require_non_flow_tool is None or stage_non_flow_tools >= int(stage_require_non_flow_tool or 0)
-                        require_reads = stage_require_files_read is None or len(stage_files_read) >= int(stage_require_files_read or 0)
-                        if require_non_flow and require_reads:
-                            status = "completed"
-                    stage_used_write = bool(_extract_task_files(stage_messages))
-                    stage_made_change = _stage_made_change(stage_messages)
-                    if status != "completed" and flow_retry_hints:
-                        retry_hint = _build_flow_retry_hint(
-                            stage_id,
-                            stage_used_write,
-                            stage_made_change,
-                            sub_summary if sub_summary else None,
-                        )
-                        if missing_hint:
-                            retry_hint = f"{retry_hint} {missing_hint}".strip()
-                    if status == "completed" or not flow_stage_required or attempt >= flow_stage_retries:
-                        break
-                    attempt += 1
-            finally:
-                TASK_ID = saved_task_id
-                TASK_INDEX = saved_task_index
-                TASK_TOTAL = saved_task_total
-
-            files_changed = _extract_task_files(stage_messages)
-            files_read = _extract_task_reads(stage_messages)
-            stage_used_write = bool(files_changed)
-            stage_made_change = _stage_made_change(stage_messages)
-
-            note, meta_payload = _build_flow_stage_note(stage_label, content, files_read, files_changed, stage_signal)
-            flow_context_notes.append(note)
-
-            report: Dict[str, Any] = {
-                "stage": stage_id,
-                "label": stage_label,
-                "status": status,
-                "attempts": attempt + 1,
-                "retries": flow_stage_retries,
-                "files_changed": files_changed,
-                "files_read": files_read,
-                "summary": meta_payload.get("summary") if isinstance(meta_payload, dict) else None,
-                "payload": meta_payload,
-                "used_write_tools": stage_used_write,
-                "made_code_change": stage_made_change,
-            }
-            if sub_summary:
-                report.update({
-                    "tool_calls_total": sub_summary.get("tool_calls_total"),
-                    "tool_errors_total": sub_summary.get("tool_errors_total"),
-                    "tool_call_counts": sub_summary.get("tool_call_counts"),
-                    "tool_error_counts": sub_summary.get("tool_error_counts"),
-                    "analysis_retries": sub_summary.get("analysis_retries"),
-                    "feedback_counts": sub_summary.get("feedback_counts"),
-                })
-            if status != "completed":
-                report["error"] = (content or "")[:200]
-            flow_reports.append(report)
-            logging_hook.log_event("flow_stage_report", report)
-
-            if status != "completed" and flow_stage_required:
-                break
-
-        if flow_stage_required and any(r.get("status") != "completed" for r in flow_reports):
-            final_content = "error: flow stage did not complete"
-        else:
-            final_content = "ok: flow completed"
-
-        if task_output_mode == "runtime":
-            if _is_benchmark_mode():
-                final_content = _benchmark_final_output(CONTINUE_SESSION)
-        if _is_benchmark_mode() and benchmark_output_mode == "runtime":
-            final_content = _benchmark_final_output(CONTINUE_SESSION)
-
-        if final_content:
-            hooks.emit("response_content", {"content": final_content, "turn": turns})
-        messages.append({"role": "assistant", "content": final_content})
-
-        summary = _metrics.summary()
-        LAST_RUN_SUMMARY = summary
-        logging_hook.log_event("agent_done", {"turns": turns, **summary, "message_summary": summarize_messages(messages)})
-        end_data = hooks.emit("agent_end", {
-            "summary": summary,
-            "messages": messages,
-            "content": final_content,
-            "turns": turns,
-            "log_path": logging_hook.get_log_path(),
-            "system_prompt": system_prompt,
-            "phase_log_mode": phase_log_mode,
-        })
-        dump_info = end_data.get("conversation_dump")
-        if dump_info:
-            logging_hook.log_event("conversation_saved", dump_info)
-        return final_content, messages
-
-    def _execute_staged_flow() -> Optional[Tuple[str, List[Dict[str, Any]]]]:
-        global TASK_MANAGER, LAST_RUN_SUMMARY, CURRENT_MESSAGES, TASK_ID, TASK_INDEX, TASK_TOTAL
-        if not task_branching or not task_manager:
-            return None
-        if task_flow_mode != "staged3":
-            return None
-
-        if not task_manager.has_tasks():
-            task_manager.create_tasks([
-                {"id": "context", "description": "Build context for the task using read-only tools."},
-                {"id": "plan", "description": "Produce a concise plan for the task."},
-                {"id": "implement", "description": "Implement the task."},
-            ])
-
-        tasks_list = task_manager.list_tasks()
-        summaries: List[str] = []
-        task_context_notes: List[str] = []
-        context_summary = ""
-        plan_summary = ""
-        plan_steps: List[str] = []
-        replan_max = int(agent_settings.get("task_replan_max", 0) or 0)
-
-        for idx, task in enumerate(tasks_list, start=1):
-            stage = str(task.task_id).strip().lower()
-            saved_task_id = TASK_ID
-            saved_task_index = TASK_INDEX
-            saved_task_total = TASK_TOTAL
-            TASK_ID = task.task_id
-            TASK_INDEX = idx
-            TASK_TOTAL = len(tasks_list)
-            task_manager.start_task(task.task_id)
-            attempt = 0
-            content = ""
-            task_messages: List[Dict[str, Any]] = []
-            status = "failed"
-            sub_summary: Dict[str, Any] = {}
-            try:
-                while True:
-                    stage_prompt = (
-                        f"[STAGE: {stage.upper()}]\n"
-                        f"TASK:\n{prompt}\n"
-                    )
-                    if stage == "context":
-                        stage_prompt += "Use read-only tools only. Your FIRST response MUST be a tool call.\n"
-                    elif stage == "plan":
-                        stage_prompt += (
-                            "Call plan_tasks(action=\"create\", tasks=[...]) with a short list of plan steps. "
-                            "No code changes. Your FIRST response MUST be that tool call.\n"
-                        )
-                    else:
-                        stage_prompt += "Implement the task. Your FIRST response MUST be a tool call.\n"
-
-                    if context_summary:
-                        stage_prompt += f"\nCONTEXT:\n{context_summary}\n"
-                    if plan_summary and stage == "implement":
-                        stage_prompt += f"\nPLAN:\n{plan_summary}\n"
-
-                    if attempt > 0:
-                        stage_prompt = (
-                            f"{stage_prompt}\n"
-                            f"REPLAN attempt {attempt}/{replan_max}: previous attempt failed with: {content}"
-                        )
-
-                    sub_settings = dict(agent_settings)
-                    sub_settings["task_branching"] = False
-                    sub_settings["require_code_change"] = bool(agent_settings.get("require_code_change", False)) if stage == "implement" else False
-                    sub_settings["min_tool_calls"] = 1
-
-                    sub_tools = _filter_tools_for_stage(stage)
-                    tool_names = [TOOL_DISPLAY_MAP.get(n, n) for n in sub_tools.keys()]
-                    stage_system_prompt = (
-                        f"{system_prompt}\n\n[STAGE TOOL LIST]\n"
-                        f"Available tools for this stage: {', '.join(tool_names)}\n"
-                        "Use ONLY these tools in this stage."
-                    )
-                    global TASKS_CAPTURE_MODE, TASKS_CAPTURED
-                    if stage == "plan":
-                        TASKS_CAPTURE_MODE = True
-                        TASKS_CAPTURED = []
-                    saved_hooks = {ev: list(cbs) for ev, cbs in hooks._hooks.items()}
-                    saved_current_messages = CURRENT_MESSAGES
-                    content, task_messages = run_agent(
-                        stage_prompt,
-                        stage_system_prompt,
-                        sub_tools,
-                        sub_settings,
-                        previous_messages=None,
-                        task_depth=task_depth + 1,
-                    )
-                    if isinstance(LAST_RUN_SUMMARY, dict):
-                        sub_summary = dict(LAST_RUN_SUMMARY)
-                    hooks._hooks = saved_hooks
-                    CURRENT_MESSAGES = saved_current_messages
-                    if stage == "plan":
-                        TASKS_CAPTURE_MODE = False
-                    status = "failed" if str(content).startswith("error:") else "completed"
-                    if status == "completed" or attempt >= replan_max:
-                        break
-                    attempt += 1
-            finally:
-                TASK_ID = saved_task_id
-                TASK_INDEX = saved_task_index
-                TASK_TOTAL = saved_task_total
-
-            files_changed = _extract_task_files(task_messages)
-            files_read = _extract_task_reads(task_messages)
-            attempts_used = attempt + 1
-
-            if stage == "context":
-                context_summary = _compact_stage_summary(content, files_read)
-            elif stage == "plan":
-                captured_steps = [t.get("description") for t in (TASKS_CAPTURED or []) if isinstance(t, dict)]
-                plan_steps = [s for s in captured_steps if isinstance(s, str) and s.strip()]
-                if plan_steps:
-                    plan_summary = "\n".join(f"- {step.strip()}" for step in plan_steps)
-                else:
-                    plan_steps = _extract_plan_steps(content)
-                    if plan_steps:
-                        plan_summary = "\n".join(f"- {step}" for step in plan_steps)
-                    else:
-                        plan_summary = _compact_stage_summary(content, files_read)
-
-            report: Dict[str, Any] = {
-                "task_id": task.task_id,
-                "status": status,
-                "description": task.description,
-                "attempts": attempts_used,
-                "replan_max": replan_max,
-                "files_changed": files_changed,
-                "files_read": files_read,
-                "plan_steps": plan_steps if stage == "plan" else [],
-                "phase": stage,
-            }
-            if sub_summary:
-                report.update({
-                    "tool_calls_total": sub_summary.get("tool_calls_total"),
-                    "tool_errors_total": sub_summary.get("tool_errors_total"),
-                    "tool_call_counts": sub_summary.get("tool_call_counts"),
-                    "tool_error_counts": sub_summary.get("tool_error_counts"),
-                    "analysis_retries": sub_summary.get("analysis_retries"),
-                    "feedback_counts": sub_summary.get("feedback_counts"),
-                })
-            if status != "completed":
-                report["error"] = (content or "")[:200]
-
-            report_errors = _validate_task_report(report)
-            if report_errors:
-                logging_hook.log_event("task_report_invalid", {
-                    "task_id": task.task_id,
-                    "errors": report_errors,
-                    "status": status,
-                })
-            logging_hook.log_event("task_report", report)
-
-            context_line = f"{task.task_id}: status={status}"
-            if files_read:
-                context_line += f"; read={', '.join(files_read)}"
-            if files_changed:
-                context_line += f"; changed={', '.join(files_changed)}"
-            task_context_notes.append(context_line)
-
-            summary = _build_task_summary(
-                task.task_id,
-                task.description,
-                status,
-                content or "",
-                files_changed,
-            )
-            task_manager.end_task(
-                task.task_id,
-                status=status,
-                summary=summary,
-                files_changed=files_changed,
-                files_read=files_read,
-                error=(content if status == "failed" else None),
-            )
-            summaries.append(summary)
-            if task_output_mode == "human":
-                messages.append({"role": "system", "content": f"[TASK SUMMARY] {summary}"})
-
-        TASK_MANAGER = None
-        if task_output_mode == "runtime":
-            if _is_benchmark_mode():
-                final_content = _benchmark_final_output(CONTINUE_SESSION)
-            else:
-                final_content = "ok: completed"
-        else:
-            final_content = "\n".join(summaries) if summaries else "ok: no tasks executed"
-        if _is_benchmark_mode() and benchmark_output_mode == "runtime":
-            final_content = _benchmark_final_output(CONTINUE_SESSION)
-        if final_content:
-            hooks.emit("response_content", {"content": final_content, "turn": turns})
-        messages.append({"role": "assistant", "content": final_content})
-        summary = _metrics.summary()
-        LAST_RUN_SUMMARY = summary
-        logging_hook.log_event("agent_done", {"turns": turns, **summary, "message_summary": summarize_messages(messages)})
-        end_data = hooks.emit("agent_end", {
-            "summary": summary,
-            "messages": messages,
-            "content": final_content,
-            "turns": turns,
-            "log_path": logging_hook.get_log_path(),
-            "system_prompt": system_prompt,
-            "phase_log_mode": phase_log_mode,
-        })
-        dump_info = end_data.get("conversation_dump")
-        if dump_info:
-            logging_hook.log_event("conversation_saved", dump_info)
-        return final_content, messages
-
-    if flow_enabled:
-        flow_result = _execute_flow()
-        if flow_result is not None:
-            return flow_result
-
-    if task_branching and task_flow_mode == "staged3":
-        staged_result = _execute_staged_flow()
-        if staged_result is not None:
-            return staged_result
+        return selected
 
     def _emit_agent_end_on_error(error_msg):
         """Emit agent_end hook on error paths so .log and .raw.json are always created."""
@@ -3022,6 +1530,7 @@ def run_agent(
             "log_path": logging_hook.get_log_path(),
             "system_prompt": system_prompt,
             "phase_log_mode": phase_log_mode,
+            "last_request_snapshot": LAST_REQUEST_SNAPSHOT,
         })
         dump_info = end_data.get("conversation_dump")
         if dump_info:
@@ -3057,26 +1566,6 @@ def run_agent(
         tool_choice_required = is_tool_choice_required(current_overrides.get("tool_choice")) or base_tool_choice_required
 
         system_prompt_effective = system_prompt
-        if task_branching and task_manager:
-            if task_manager.has_tasks():
-                system_prompt_effective = f"{system_prompt}\n[TASKS]\n{task_manager.format_tasks()}"
-            else:
-                if task_plan_mode == "first":
-                    system_prompt_effective = (
-                        f"{system_prompt}\n"
-                        "TASK MODE: Call plan_tasks(action=\"create\", tasks=[...]) as the FIRST tool call. "
-                        "Do not use any other tools before planning."
-                    )
-                elif task_plan_mode == "explore":
-                    system_prompt_effective = (
-                        f"{system_prompt}\n"
-                        "TASK MODE: You may use read-only tools to explore, then call "
-                        "plan_tasks(action=\"create\", tasks=[...]) before any write/edit/patch."
-                    )
-        if phase_enabled and phase_state and phase_prompts:
-            phase_hint = phase_prompts.get(phase_state)
-            if isinstance(phase_hint, str) and phase_hint.strip():
-                system_prompt_effective = f"{system_prompt_effective}\n{phase_hint.strip()}"
         response = call_api(request_messages, system_prompt_effective, tools_dict, current_overrides)
         last_request_id = response.get("request_id")
 
@@ -3111,19 +1600,7 @@ def run_agent(
                 "kept": max_batch,
             })
             tool_calls = tool_calls[:max_batch]
-        thinking = message.get("thinking")
-        if not thinking:
-            thinking = message.get("reasoning_content")
-        # Fallback: parse <think> from content when server returns thinking inline
-        if not thinking and content and "</think>" in content:
-            think_end = content.find("</think>")
-            thinking = content[:think_end].strip()
-            content = content[think_end + 8:].strip()
-
-        if thinking and native_thinking:
-            t = str(thinking).strip()
-            if t:
-                logging_hook.log_event("thinking_captured", {"turn": turns, "chars": len(t)})
+        thinking = extract_assistant_thinking(message, raw_content) if native_thinking else None
 
         tool_names = [tc.get("function", {}).get("name", "") for tc in tool_calls]
         resolved_tool_names = [resolve_tool_name(n) for n in tool_names]
@@ -3134,13 +1611,18 @@ def run_agent(
             "tool_calls_resolved": resolved_tool_names,
             "tool_call_count": len(tool_calls),
             "content_len": len(content),
+            "thinking_len": len(thinking) if thinking else 0,
             "content_preview": content[:200],
             "request_id": response.get("request_id"),
             "tool_call_ids": tool_call_ids,
         })
         if _turn_summary_enabled():
-            visible_thinking = thinking if _thinking_visible() else None
-            _print_turn_summary(turns, tool_calls, content, visible_thinking)
+            _print_turn_summary(
+                turns,
+                tool_calls,
+                content,
+                thinking if thinking and thinking_visibility == "show" else None,
+            )
 
         # Enforced tool choice mismatch handling
         if enforced_tool_choice:
@@ -3256,7 +1738,16 @@ def run_agent(
                 print(f"\n{CYAN}⏺{RESET} {content}")
                 hooks.emit("response_content", {"content": content, "turn": turns})
 
-            messages.append(message)
+            assistant_final: Dict[str, Any] = {
+                "role": "assistant",
+                "content": content,
+            }
+            if native_thinking and thinking:
+                assistant_final["reasoning_content"] = thinking
+                raw_thinking = message.get("thinking")
+                if raw_thinking is not None:
+                    assistant_final["thinking"] = raw_thinking
+            messages.append(assistant_final)
             summary = _metrics.summary()
             LAST_RUN_SUMMARY = summary
             logging_hook.log_event("agent_done", {"turns": turns, **summary, "message_summary": summarize_messages(messages)})
@@ -3270,6 +1761,7 @@ def run_agent(
                 "log_path": logging_hook.get_log_path(),
                 "system_prompt": system_prompt,
                 "phase_log_mode": phase_log_mode,
+                "last_request_snapshot": LAST_REQUEST_SNAPSHOT,
             })
             # Log conversation dump result if the hook produced one
             dump_info = end_data.get("conversation_dump")
@@ -3280,45 +1772,20 @@ def run_agent(
 
         # Tool calls path
         assistant_message: Dict[str, Any] = {"role": "assistant", "content": "", "tool_calls": tool_calls}
-        # For "native" mode, include thinking directly in assistant message
         if native_thinking and thinking:
-            # Most templates expect reasoning_content (Kimi K2.5, DeepSeek, GLM)
             assistant_message["reasoning_content"] = thinking
-            # Also set thinking field for compatibility (Harmony, etc.)
-            if "glm" not in MODEL.lower():
-                assistant_message["thinking"] = thinking
+            raw_thinking = message.get("thinking")
+            if raw_thinking is not None:
+                assistant_message["thinking"] = raw_thinking
         tool_results: List[Dict[str, Any]] = []
 
         feedback_text = None
         feedback_reason = None
-        plan_tasks_created = False
         finish_requested = False
         finish_payload: Dict[str, Any] = {}
         for tc in tool_calls:
             # Hook: tool_before (mutable — hooks can modify tool_args)
             tc_display_name = (tc.get("function") or {}).get("name") or ""
-            resolved_name_pre = resolve_tool_name(tc_display_name)
-            if task_branching and task_manager and not task_manager.has_tasks():
-                if task_plan_mode == "first":
-                    if resolved_name_pre != "plan_tasks":
-                        feedback_text = (
-                            "FORMAT ERROR: task planning required. "
-                            "Call plan_tasks(action=\"create\", tasks=[...]) "
-                            "as the FIRST tool call."
-                        )
-                        feedback_reason = "task_plan_required_first"
-                        break
-                elif task_plan_mode == "explore":
-                    category = TOOL_CATEGORIES.get(resolved_name_pre)
-                    if resolved_name_pre != "plan_tasks" and category not in ("read", "reasoning"):
-                        feedback_text = (
-                            "FORMAT ERROR: task planning required. "
-                            "Use read-only tools to explore, then call "
-                            "plan_tasks(action=\"create\", tasks=[...]) "
-                            "before any write/edit/patch."
-                        )
-                        feedback_reason = "task_plan_required"
-                        break
             before_data = hooks.emit("tool_before", {
                 "tool_name": resolve_tool_name(tc_display_name),
                 "tool_args": (tc.get("function") or {}).get("arguments", "{}"),
@@ -3326,10 +1793,6 @@ def run_agent(
             })
 
             resolved_name, tool_args, result, response_name = process_tool_call(tools_dict, tc)
-            if resolved_name == "plan_tasks" and isinstance(tool_args, dict):
-                action = str(tool_args.get("action") or "").strip().lower()
-                if action == "create":
-                    plan_tasks_created = True
 
             # Pretty print
             arg_preview = ""
@@ -3373,26 +1836,6 @@ def run_agent(
                     if _did_tool_make_change(resolved_name, result):
                         code_change_made = True
 
-            if progress_enabled:
-                if resolved_name in {"read", "read_file"} and isinstance(path_value, str):
-                    _progress_remember_read(path_value)
-                elif resolved_name in {"batch_read", "read_files"} and isinstance(tool_args, dict):
-                    for p in (tool_args.get("paths") or []):
-                        if isinstance(p, str):
-                            _progress_remember_read(p)
-                if is_write_tool(resolved_name) and isinstance(path_value, str):
-                    _progress_remember_write(path_value)
-                if is_write_tool(resolved_name):
-                    progress_non_write_streak = 0
-                elif resolved_name != "finish":
-                    progress_non_write_streak += 1
-                if error_detected and isinstance(result, str):
-                    progress_last_error = result.splitlines()[0][:200]
-                elif not error_detected:
-                    progress_last_error = ""
-                if isinstance(path_value, str):
-                    progress_last_path = path_value
-
             logging_hook.log_event("tool_result", {
                 "turn": turns,
                 "tool": tc_display_name or response_name or resolved_name,
@@ -3425,15 +1868,6 @@ def run_agent(
         messages.append(assistant_message)
         messages.extend(tool_results)
 
-        if progress_enabled and tool_results and not finish_requested:
-            progress_text, progress_payload = _build_progress_message()
-            messages.append({"role": "user", "content": progress_text})
-            logging_hook.log_event("progress_injected", {
-                "turn": turns,
-                "message": progress_text[:200],
-                **progress_payload,
-            })
-
         if finish_requested and not feedback_text:
             if require_code_change and not code_change_made:
                 feedback_text = (
@@ -3460,6 +1894,7 @@ def run_agent(
                     "log_path": logging_hook.get_log_path(),
                     "system_prompt": system_prompt,
                     "phase_log_mode": phase_log_mode,
+                    "last_request_snapshot": LAST_REQUEST_SNAPSHOT,
                 })
                 dump_info = end_data.get("conversation_dump")
                 if dump_info:
@@ -3467,60 +1902,7 @@ def run_agent(
 
                 return content, messages
 
-        if phase_enabled:
-            turn_reads = _extract_task_reads([assistant_message])
-            turn_changes = _extract_task_files([assistant_message])
-            if turn_reads:
-                phase_signals["files_read"].update(turn_reads)
-            if turn_changes:
-                phase_signals["files_changed"].update(turn_changes)
-            for tool_name in resolved_tool_names:
-                category = TOOL_CATEGORIES.get(tool_name)
-                if category == "read":
-                    phase_signals["read_tools"] += 1
-                elif category == "write":
-                    phase_signals["write_tools"] += 1
-                if tool_name == "plan_tasks":
-                    phase_signals["plan_tools"] += 1
-            if content:
-                if _extract_plan_steps(content):
-                    phase_signals["plan_detected"] = True
-            if code_change_made:
-                phase_signals["code_change"] = True
-            phase_snapshot = {
-                "files_read": len(phase_signals["files_read"]),
-                "files_changed": len(phase_signals["files_changed"]),
-                "read_tools": phase_signals["read_tools"],
-                "write_tools": phase_signals["write_tools"],
-                "plan_tools": phase_signals["plan_tools"],
-                "code_change": phase_signals["code_change"],
-                "plan_detected": phase_signals["plan_detected"],
-            }
-            new_phase = _phase_update(phase_state, turns, resolved_tool_names)
-            if new_phase != phase_state:
-                phase_transition_payload = {
-                    "turn": turns,
-                    "from": phase_state,
-                    "to": new_phase,
-                    "signals": dict(phase_snapshot),
-                }
-                logging_hook.log_event("phase_transition", phase_transition_payload)
-                if phase_log_stdout:
-                    _print_phase_event("transition", phase_transition_payload)
-                phase_state = new_phase
-            phase_state_payload = {
-                "turn": turns,
-                "phase": phase_state,
-                "signals": dict(phase_snapshot),
-            }
-            logging_hook.log_event("phase_state", phase_state_payload)
-            if phase_log_stdout:
-                _print_phase_event("state", phase_state_payload)
-
-        if task_branching and plan_tasks_created and not feedback_text:
-            task_result = _execute_task_branches()
-            if task_result:
-                return task_result
+        # phase/task orchestration removed
 
         if feedback_text:
             attempt_num = None
@@ -3531,6 +1913,15 @@ def run_agent(
                 if lines:
                     lines[0] = f"{lines[0]} (attempt {attempt_num})"
                     feedback_text = "\n".join(lines)
+
+            if feedback_reason == "unknown_tool_name" and attempt_num and attempt_num >= 2:
+                available_tools = ", ".join(sorted(TOOL_DISPLAY_MAP.get(name, name) for name in tools_dict.keys()))
+                feedback_text = (
+                    f"{feedback_text}\n"
+                    "STRICT ACTION: you repeated an unknown tool name. "
+                    "Next response must be exactly one valid tool call.\n"
+                    f"Allowed tools: {available_tools}"
+                )
 
             # Hard stop guard: repeated no-op writes can trap weaker models forever.
             # End the run after several repeated-noop feedback cycles.
@@ -3570,45 +1961,6 @@ def run_agent(
             # Hook: turn_end
             hooks.emit("turn_end", {"turn": turns, "tool_count": len(tool_calls), "errors": _metrics.tool_errors_total})
             continue
-
-        # Write nudge: remind model to write if running low on turns without code change
-        if (require_code_change and not code_change_made and not write_nudge_sent):
-            effective_turns = turns - format_retry_turns
-            nudge_threshold = max(5, agent_max_turns // 3)
-            if effective_turns >= nudge_threshold:
-                write_nudge_sent = True
-                remaining = agent_max_turns - effective_turns
-                available_write_tools = get_available_write_tools(tools_dict)
-                tools_str = "/".join(available_write_tools) if available_write_tools else "write_file"
-                nudge_msg = (
-                    f"IMPORTANT: You have used {effective_turns} of {agent_max_turns} turns without writing code. "
-                    f"You have {remaining} turns left. Use {tools_str} NOW to implement your solution."
-                )
-                messages.append({"role": "user", "content": nudge_msg})
-                logging_hook.log_event("write_nudge", {
-                    "turn": turns,
-                    "effective_turn": effective_turns,
-                    "remaining": remaining,
-                })
-
-        # Finish nudge: avoid looping near turn limit when code has already changed.
-        if code_change_made and not finish_nudge_sent:
-            effective_turns = turns - format_retry_turns
-            remaining = agent_max_turns - effective_turns
-            if remaining <= 2:
-                finish_nudge_sent = True
-                finish_tool = TOOL_DISPLAY_MAP.get("finish", "finish")
-                finish_msg = (
-                    f"IMPORTANT: {remaining} turns left. "
-                    f"If your implementation is complete, call {finish_tool} now. "
-                    "If not complete, make one final targeted change."
-                )
-                messages.append({"role": "user", "content": finish_msg})
-                logging_hook.log_event("finish_nudge", {
-                    "turn": turns,
-                    "effective_turn": effective_turns,
-                    "remaining": remaining,
-                })
 
         # Noop force-stop: end early if model is stuck in noop edit loop
         if code_change_made and not feedback_text and tool_calls:
@@ -3667,6 +2019,14 @@ def run_once(prompt: str, system_prompt: str, tools_dict: ToolsDict) -> None:
         "continue_session": continue_mode,
         "previous_message_count": len(previous) if previous else 0,
     })
+    ignored_keys = AGENT_SETTINGS.get("deprecated_ignored_keys") or []
+    if ignored_keys:
+        joined = ", ".join(str(k) for k in ignored_keys)
+        print(f"{YELLOW}warning:{RESET} ignoring deprecated agent settings: {joined}")
+        logging_hook.log_event("config_warning", {
+            "kind": "deprecated_agent_settings_ignored",
+            "keys": list(ignored_keys),
+        })
 
     content, messages = run_agent(prompt, system_prompt, tools_dict, AGENT_SETTINGS, previous)
 
@@ -3823,7 +2183,7 @@ if __name__ == "__main__":
     TOOL_DISPLAY_MAP.update(display_map)
     _tool_state.TOOL_DISPLAY_MAP.update(display_map)
     TOOL_CATEGORIES.clear()
-    TOOL_CATEGORIES.update(build_tool_category_map(tool_defs))
+    TOOL_CATEGORIES.update(build_tool_category_map(tool_defs, tool_order, display_map))
     system_prompt = load_system_prompt(agent_config, tool_defs, tool_order, display_map)
     AGENT_SETTINGS = build_agent_settings(agent_config)
 
@@ -3838,9 +2198,6 @@ if __name__ == "__main__":
         "search": search_fn,
         "shell": shell,
         "ls": ls_fn,
-        "think": think_tool,
-        "plan_tasks": plan_tasks,
-        "flow_stage_done": flow_stage_done,
         "finish": finish_run,
     }
 

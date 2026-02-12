@@ -16,7 +16,7 @@ from localcode.tool_handlers._state import (
     MAX_SHELL_TIMEOUT_MS,
     _require_args_dict,
 )
-from localcode.tool_handlers._path import _is_path_within_sandbox
+from localcode.tool_handlers._path import _is_path_within_sandbox, to_display_path
 from localcode.tool_handlers._sandbox import (
     TEST_MENTION_RE,
     _ENV_VAR_ASSIGN_RE,
@@ -52,6 +52,7 @@ def shell(args: Any) -> str:
     workdir = args.get("workdir", ".") or "."
     workdir = os.path.abspath(os.path.expanduser(workdir))
     workdir_real = os.path.realpath(workdir)
+    display_workdir = to_display_path(workdir_real)
     timeout_ms = args.get("timeout_ms", DEFAULT_SHELL_TIMEOUT_MS)
 
     if not command or not isinstance(command, str):
@@ -59,13 +60,13 @@ def shell(args: Any) -> str:
 
     if not os.path.isdir(workdir_real):
         return _shell_payload(
-            f"error: workdir does not exist: {workdir} (resolved: {workdir_real})",
+            f"error: workdir does not exist: {display_workdir}",
             1,
             0.0,
         )
 
     if _state.SANDBOX_ROOT and not _is_path_within_sandbox(workdir_real, _state.SANDBOX_ROOT):
-        return _shell_payload(f"error: workdir '{workdir}' is outside sandbox root '{_state.SANDBOX_ROOT}'", 1, 0.0)
+        return _shell_payload(f"error: workdir '{display_workdir}' is outside sandbox root", 1, 0.0)
 
     if TEST_MENTION_RE.search(command):
         return _shell_payload("error: test commands are not allowed; tests run automatically after completion.", 1, 0.0)
@@ -144,5 +145,10 @@ def shell(args: Any) -> str:
         dur = round(time.time() - start, 1)
         out = f"command timed out after {timeout_ms_int} milliseconds"
         return _shell_payload(out, 124, dur, timed_out=True)
-    except Exception as e:
-        return _shell_payload(f"error: {e}", 1, 0.0)
+    except FileNotFoundError:
+        cmd_name = cmd_args[0] if cmd_args else "command"
+        return _shell_payload(f"error: command not found: {cmd_name}", 1, 0.0)
+    except PermissionError:
+        return _shell_payload("error: permission denied while executing command", 1, 0.0)
+    except Exception:
+        return _shell_payload("error: failed to execute command", 1, 0.0)

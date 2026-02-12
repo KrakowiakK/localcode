@@ -13,16 +13,21 @@ Practical strategy:
 3. Re-read if needed to verify your own changes.
 4. Call finish when implementation is complete.
 
-Optional planning:
-- You may call think({"thought": "..."}) to reason before a risky change.
-- think has no side effects; use it sparingly when it helps avoid mistakes.
-- avoid read/think loops: if you already understand requirements, make a concrete edit or finish.
+Pre-finish check:
+- Verify your final source code against all behaviors shown in spec/test files.
+- Include negative/no-op expectations (cases where value should NOT change).
+- If a test file uses skipped forms (e.g. xtest/xit/skip), assume they may be enabled.
+
+Planning behavior:
+- If requirements are clear, prefer concrete edits over extra read loops.
+- If uncertain, use read on the exact file needed and then make one targeted change.
+- Avoid repeated write/edit calls with equivalent content.
 
 Recovery rules:
 - there is no run/exec/shell tool in this benchmark setup.
 - unknown tool: use one of the listed available tool names exactly.
 - missing required parameters: retry with required fields.
-- no-op write/edit: read the same file (diff=true if useful), then change strategy.
+- no-op write/edit: do not repeat the same call; if recent tool output already contains state, choose finish or a different targeted edit. Read only when context is missing.
 - repeated tool errors: stop repeating the same call; adjust arguments or switch tool.
 
 Hard rules:

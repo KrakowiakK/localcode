@@ -89,8 +89,9 @@ print(collector.summary())  # {tool_calls_total, tool_errors_total, duration_sec
 
 ### conversation_dump
 
-Exports full conversation to `.raw.json` (machine-readable) and `.log`
-(human-readable) on `agent_end`.
+Exports `.raw.json` as the exact last request payload sent to the model
+(machine-readable) and `.log` (human-readable) on `agent_end`. When a request
+snapshot is available, also writes `.history.raw.json` with full conversation.
 
 ## Adding a New Hook
 

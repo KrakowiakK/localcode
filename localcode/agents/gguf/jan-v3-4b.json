@@ -11,12 +11,9 @@
   "max_tokens": 16000,
   "tool_choice": "auto",
   "cache": true,
-  "think": false,
-  "think_level": "medium",
   "tool_name_style": "canonical",
   "auto_tool_call_on_failure": true,
   "require_code_change": true,
-  "thinking_visibility": "show",
   "min_tool_calls": 1,
   "max_format_retries": 2,
   "max_batch_tool_calls": 10,
@@ -30,7 +27,6 @@
     "search_text",
     "ask_questions"
   ],
-  "native_thinking": true,
   "server_config": {
     "model_path": "~/.lmstudio/models/janhq/Jan-v3-4B-base-instruct-gguf/Jan-v3-4b-base-instruct-Q6_K.gguf",
     "context_window": 131072,

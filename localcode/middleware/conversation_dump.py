@@ -30,28 +30,59 @@ def _load_phase_events(log_path: str) -> List[Dict[str, Any]]:
     return events
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert arbitrary payloads to JSON-serializable data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return repr(value)
+
+
 def _dump_conversation(
     log_path: str,
     system_prompt: str,
     messages: List[Dict[str, Any]],
     phase_log_mode: Optional[str] = None,
+    last_request_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, str]]:
-    """Dump full conversation to .raw.json and .log files.
+    """Dump last model request + full conversation snapshots and pretty log.
 
     Returns dict with 'raw' and 'pretty' paths, or None on failure.
     """
     base_path = log_path.rsplit(".", 1)[0]
     full_conv = [{"role": "system", "content": system_prompt}] + list(messages)
+    full_conv_safe = _json_safe(full_conv)
+    request_snapshot_safe = _json_safe(last_request_snapshot) if isinstance(last_request_snapshot, dict) else None
 
     raw_path = base_path + ".raw.json"
+    history_raw_path = base_path + ".history.raw.json"
     pretty_path = base_path + ".log"
 
-    # 1) Raw JSON
-    try:
-        with open(raw_path, "w", encoding="utf-8") as rf:
-            json.dump(full_conv, rf, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
+    # 1) Raw JSON (exact last request payload when available)
+    request_dump_written = isinstance(request_snapshot_safe, dict) and bool(request_snapshot_safe)
+    history_dump_written = False
+    if request_dump_written:
+        try:
+            with open(raw_path, "w", encoding="utf-8") as qf:
+                json.dump(request_snapshot_safe, qf, indent=2, ensure_ascii=False)
+        except Exception:
+            request_dump_written = False
+    if request_dump_written:
+        try:
+            with open(history_raw_path, "w", encoding="utf-8") as hf:
+                json.dump(full_conv_safe, hf, indent=2, ensure_ascii=False)
+            history_dump_written = True
+        except Exception:
+            history_dump_written = False
+    else:
+        try:
+            with open(raw_path, "w", encoding="utf-8") as rf:
+                json.dump(full_conv_safe, rf, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
 
     # 2) Pretty human-readable
     try:
@@ -94,7 +125,12 @@ def _dump_conversation(
     except Exception:
         pass
 
-    return {"raw": raw_path, "pretty": pretty_path, "message_count": len(full_conv)}
+    out = {"raw": raw_path, "pretty": pretty_path, "message_count": len(full_conv)}
+    if request_dump_written:
+        out["request_raw"] = raw_path
+    if history_dump_written:
+        out["history_raw"] = history_raw_path
+    return out
 
 
 def on_agent_end(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,8 +142,15 @@ def on_agent_end(data: Dict[str, Any]) -> Dict[str, Any]:
     system_prompt = data.get("system_prompt", "")
     messages = data.get("messages", [])
     phase_log_mode = data.get("phase_log_mode")
+    last_request_snapshot = data.get("last_request_snapshot")
 
-    result = _dump_conversation(log_path, system_prompt, messages, phase_log_mode=phase_log_mode)
+    result = _dump_conversation(
+        log_path,
+        system_prompt,
+        messages,
+        phase_log_mode=phase_log_mode,
+        last_request_snapshot=last_request_snapshot if isinstance(last_request_snapshot, dict) else None,
+    )
     if result:
         data["conversation_dump"] = result
 

@@ -1,0 +1,10 @@
+React-task contract lens (important when task is reactive cells):
+Treat these as required invariants from specs:
+Input cells keep value and support set/update API exactly as tests use.
+Compute cells derive value from dependencies in correct order.
+Dependency updates propagate to stable state.
+Callbacks fire only when output value changed.
+Callbacks fire once per stable update, even if multiple dependencies changed.
+Removing callback multiple times is safe.
+If output value is unchanged, callbacks do not fire.
+CallbackCell stores callback return values exactly.

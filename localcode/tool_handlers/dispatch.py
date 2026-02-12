@@ -54,6 +54,8 @@ _NUMBER_WORDS = {
 
 _TOOL_ARG_NUMBER_FIELDS = {
     "read": {"line_start", "line_end", "offset", "limit"},
+    "search": {"max_results"},
+    "ask_agent": {"timeout"},
 }
 
 
@@ -98,6 +100,15 @@ _ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "query": "pattern", "text": "pattern", "regex": "pattern",
         "pat": "pattern",
         "file": "path", "dir": "path",
+        "max": "max_results", "limit": "max_results", "maxresults": "max_results",
+    },
+    "ask_agent": {
+        "question": "prompt", "query": "prompt", "text": "prompt",
+        "secs": "timeout", "seconds": "timeout", "time_limit": "timeout",
+    },
+    "plan_solution": {
+        "question": "prompt", "query": "prompt", "request": "prompt",
+        "text": "prompt", "content": "prompt", "thought": "prompt",
     },
 }
 
@@ -183,6 +194,53 @@ def _repair_number_word_args(raw_args: str, fields: set) -> str:
         return m.group(0)
 
     return re.sub(pattern, repl, raw_args)
+
+
+def _coerce_integer_like_value(value: Any) -> Tuple[Optional[int], bool]:
+    """Convert integer-like values (10, 10.0, '10', '10.0', number-words) to int."""
+    if isinstance(value, bool):
+        return None, False
+    if isinstance(value, int):
+        return value, True
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value), True
+        return None, False
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None, False
+        word_num = _parse_number_words(text)
+        if word_num is not None:
+            return word_num, True
+        if re.fullmatch(r"[-+]?\d+", text):
+            try:
+                return int(text), True
+            except ValueError:
+                return None, False
+        if re.fullmatch(r"[-+]?\d+\.0+", text):
+            try:
+                return int(float(text)), True
+            except ValueError:
+                return None, False
+    return None, False
+
+
+def _coerce_integer_like_fields(tool_name: str, args: Dict[str, Any]) -> Optional[str]:
+    fields = _TOOL_ARG_NUMBER_FIELDS.get(tool_name)
+    if not fields:
+        return None
+    for field in fields:
+        if field not in args:
+            continue
+        coerced, ok = _coerce_integer_like_value(args[field])
+        if not ok:
+            return (
+                f"error: invalid type for parameter '{field}' on tool '{tool_name}': "
+                "expected whole number (e.g., 10 or 10.0)"
+            )
+        args[field] = coerced
+    return None
 
 
 def _extract_patch_block(text: str) -> Optional[str]:
@@ -369,14 +427,6 @@ def process_tool_call(tools_dict: ToolsDict, tc: Dict[str, Any]) -> Tuple[str, D
         available = sorted(TOOL_DISPLAY_MAP.get(k, k) for k in tools_dict)
         return resolved, tool_args, f"error: unknown tool '{tool_name}'. Available tools: {', '.join(available)}. Use one of these.", tool_name
 
-    # Post-parse repair for string number fields
-    if resolved in _TOOL_ARG_NUMBER_FIELDS:
-        for field in _TOOL_ARG_NUMBER_FIELDS[resolved]:
-            if isinstance(tool_args.get(field), str):
-                v = _parse_number_words(tool_args[field])
-                if v is not None:
-                    tool_args[field] = v
-
     # Normalize argument names (alias mapping for small-model friendliness)
     if isinstance(tool_args, dict):
         original_keys = set(tool_args.keys())
@@ -388,6 +438,12 @@ def process_tool_call(tools_dict: ToolsDict, tc: Dict[str, Any]) -> Tuple[str, D
                 "reason": "arg_alias_remap",
                 "remapped": sorted(remapped_keys),
             })
+
+    # Post-remap repair/coercion for integer-like fields.
+    if isinstance(tool_args, dict):
+        integer_like_error = _coerce_integer_like_fields(resolved, tool_args)
+        if integer_like_error:
+            return resolved, tool_args, integer_like_error, tool_name
 
     params = tools_dict[resolved][1]
     validation_error = _validate_tool_args(resolved, tool_args, params)

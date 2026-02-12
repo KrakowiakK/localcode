@@ -215,16 +215,15 @@ with JSON agent configs.
 
 ```bash
 # Run with prompt file
-python3 localcode/localcode.py --agent gguf/glm-4.7-flash --file prompt.md
+python3 localcode/localcode.py --agent gguf/glm-4.7-flash-q6k --file prompt.md
 
 # With custom model/URL
-python3 localcode/localcode.py --agent benchmark \
-  --model gpt-oss-120b@8bit \
-  --url http://localhost:1234/v1/chat/completions \
+python3 localcode/localcode.py --agent gguf/gpt-oss-120b-mxfp4 \
+  --url http://localhost:1235/v1/chat/completions \
   --file prompt.md
 
 # Continue previous session
-python3 localcode/localcode.py --agent assistant --continue
+python3 localcode/localcode.py --agent gguf/gpt-oss-120b-mxfp4 --continue
 ```
 
 ### Benchmark Workflow
@@ -248,8 +247,7 @@ Agent configs in `localcode/agents/*.json` define model, tools, and inference pa
   "temperature": 0.7,
   "max_tokens": 16000,
   "tool_choice": "auto",
-  "think": true,
-  "think_level": "medium",
+  "history_max_messages": 16,
   "tools": ["list_dir", "read_file", "write_file", "replace_in_file", "patch_files", "find_files", "search_text"],
   "server_config": {
     "model_path": "~/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-UD-Q4_K_XL.gguf",
@@ -264,66 +262,25 @@ Agent configs in `localcode/agents/*.json` define model, tools, and inference pa
 | `url` | Server endpoint (port determines GGUF vs MLX) |
 | `tools` | Ordered list of available tools |
 | `tool_choice` | `auto` / `required` / `none` |
-| `think` | `true` / `false` — enable reasoning |
-| `think_level` | `low` / `medium` / `high` — reasoning effort |
 | `cache` | `true` / `false` — prompt caching |
+| `think` | Enable model-native reasoning output (when supported) |
+| `think_level` / `thinking_level` | Reasoning effort hint forwarded as `reasoning_effort` |
+| `native_thinking` | Preserve assistant reasoning in history for thinking models |
+| `thinking_visibility` | `show` / `hidden` for terminal rendering of thinking text |
 | `auto_tool_call_on_failure` | Auto-call a tool when minimum tool calls not met |
 | `require_code_change` | Require a write/edit/patch before finishing |
-| `native_thinking` | Preserve thinking in assistant messages |
 | `min_tool_calls` | Minimum tool calls required |
 | `max_format_retries` | Retries on malformed responses |
 | `max_batch_tool_calls` | Max tool calls per response (1-10) |
-| `progress_injection` | Inject short per-turn state summary after tool calls |
-| `progress_max_tokens` | Max size of injected progress summary |
-| `phase_log` | `off` / `stdout` / `log` / `both` |
+| `history_max_messages` | Message window size; when exceeded, oldest messages are dropped |
 | `server_config.model_path` | Local path to the GGUF file |
 | `server_config.hf_model` | HuggingFace fallback for download |
 | `server_config.extra_args` | Additional flags for llama-server |
 
 Agent names use the JSON path relative to `agents/`:
-- `agents/gguf/gpt-oss-120b.json` → `--agent gguf/gpt-oss-120b`
+- `agents/gguf/gpt-oss-120b-mxfp4.json` → `--agent gguf/gpt-oss-120b-mxfp4`
 
-### Phase Control (side-channel)
-
-Optional phase control that does not write to conversation history.
-It injects small phase hints into the system prompt and can classify phase
-transitions using rules or a lightweight probe call.
-
-Agent config:
-
-```json
-"phase_log": "both",
-"phase_control": {
-  "mode": "off" | "rules" | "llm" | "hybrid",
-  "states": ["context","plan","implement"],
-  "default": "context",
-  "rules": {
-    "min_files_read_for_plan": 1,
-    "auto_plan_after_read": true,
-    "write_to_implement": true
-  },
-  "probe": {
-    "temperature": 0,
-    "max_tokens": 64
-  },
-  "prompts": {
-    "context": "Before making changes, read the relevant files.",
-    "plan": "Outline a short plan before editing.",
-    "implement": "Make the code changes now."
-  }
-}
-```
-
-You can also set it globally:
-
-```bash
-LOCALCODE_PHASE_LOG=both
-```
-
-### Flow / Staged Modes
-
-For stricter multi‑stage workflows, use `task_flow_mode` or a custom `flow` with
-`flow_stage_done` and `plan_tasks`. See `TASK_FLOW.md` for details.
+Legacy strategy keys such as `phase_*`, `flow_*`, `task_*`, and history sanitization/truncation options are ignored. `localcode` logs a warning when they are present.
 
 ### Available Tools
 
@@ -339,12 +296,11 @@ For stricter multi‑stage workflows, use `task_flow_mode` or a custom `flow` wi
 | `grep` | - | Search file contents (regex) |
 | `search` | `search_text` | Search file contents (simple) |
 | `shell` | - | Execute shell command (sandboxed) |
-| `think` | `reasoning`, `step_by_step` | Optional no-side-effect planning note (`thought`) |
 | `ask_agent` | - | Delegate to sub-agent |
 | `ask_questions` | - | Batch reasoning questions |
 | `plan_solution` | `get_plan` | Plan before implementing |
-| `plan_tasks` | - | Structured planning for staged flows |
-| `flow_stage_done` | - | Mark a flow stage as complete |
+
+Tool outputs normalize file paths to sandbox-relative display paths (for example `react.js`), not absolute host/container paths.
 
 ### Testing
 
@@ -355,12 +311,10 @@ For stricter multi‑stage workflows, use `task_flow_mode` or a custom `flow` wi
 ### Logs
 
 Each run creates log files in `localcode/logs/`:
-- `.jsonl` — structured events (requests, responses, tool calls, phase events)
-- `.log` — human-readable conversation dump (includes **PHASE EVENTS** when `phase_log=log|both`)
-- `.raw.json` — raw conversation in JSON
-
-When `progress_injection` is enabled, `.jsonl` includes `progress_injected` events
-with short state summaries (`read_files_count`, `write_counts`, `last_error`, `next_action`).
+- `.jsonl` — structured events (requests, responses, tool calls, feedback)
+- `.log` — human-readable conversation dump
+- `.raw.json` — exact last request payload sent to the model (includes full `messages`, `tools`, and request params)
+- `.history.raw.json` — full conversation history snapshot (written when `.raw.json` is request payload)
 
 ---
 

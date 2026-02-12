@@ -2,7 +2,7 @@
   "name": "plan_solution",
   "aliases": ["get_plan", "analyze", "reflect"],
   "category": "reasoning",
-  "description": "Call yourself to create an implementation plan. Use after reading tests/code when you need to think carefully before implementing. Has access to full conversation history.\n\nExamples:\n- {{tool:plan_solution}}({\"prompt\": \"Create implementation plan for passing all tests\"})\n- {{tool:plan_solution}}({\"prompt\": \"What edge cases should I handle based on the tests?\"})",
+  "description": "Call yourself to create an implementation plan. Use after reading tests/code when you need to think carefully before implementing. Has access to full conversation history.\n\nAccepted arg aliases:\n- question / query / request / text / content / thought -> prompt\n\nExamples:\n- {{tool:plan_solution}}({\"prompt\": \"Create implementation plan for passing all tests\"})\n- {{tool:plan_solution}}({\"question\": \"What edge cases should I handle based on the tests?\"})",
   "additionalProperties": true,
   "parameters": {
     "prompt": {
@@ -15,10 +15,17 @@
   "model_call": {
     "mode": "self",
     "include_history": true,
+    "history_sanitize": true,
+    "include_tool_messages": true,
+    "include_tool_call_summaries": false,
+    "history_tool_result_chars": 320,
+    "history_tool_call_args_chars": 120,
     "temperature": 0.3,
     "max_tokens": 4000,
     "timeout": 120,
+    "tool_choice": "none",
     "system_prompt_file": "prompts/plan_blueprint.txt",
+    "prompt_param": ["prompt", "question", "query", "request", "text", "content", "thought"],
     "user_prefix": "PLANNING REQUEST: "
   }
 }

@@ -25,7 +25,7 @@
       "default": false
     },
     "max_results": {
-      "type": "integer",
+      "type": "number",
       "optional": true,
       "default": 100,
       "minimum": 1,

@@ -15,7 +15,7 @@ from localcode.tool_handlers._state import (
     _require_args_dict,
     _track_file_version,
 )
-from localcode.tool_handlers._path import _find_file_in_sandbox, _validate_path
+from localcode.tool_handlers._path import _find_file_in_sandbox, _validate_path, to_display_path
 
 
 def _tool_hints_enabled() -> bool:
@@ -43,21 +43,32 @@ def read(args: Any) -> str:
                 return f"error: {e}"
         else:
             return f"error: {e}"
+    display_path = to_display_path(path)
 
     try:
         stat = os.stat(path)
         if stat.st_size > MAX_FILE_SIZE:
             return f"error: file too large ({stat.st_size} bytes, max {MAX_FILE_SIZE})"
-    except OSError as e:
-        return f"error: cannot stat file: {path} ({e})"
+    except FileNotFoundError:
+        return f"error: file not found: {display_path}"
+    except PermissionError:
+        return f"error: permission denied: {display_path}"
+    except OSError:
+        return f"error: cannot stat file: {display_path}"
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read(MAX_FILE_SIZE + 1)
             if len(content) > MAX_FILE_SIZE:
                 return f"error: file content exceeds {MAX_FILE_SIZE} bytes during read"
-    except OSError as e:
-        return f"error: cannot read file: {path} ({e})"
+    except FileNotFoundError:
+        return f"error: file not found: {display_path}"
+    except IsADirectoryError:
+        return f"error: is a directory: {display_path}"
+    except PermissionError:
+        return f"error: permission denied: {display_path}"
+    except OSError:
+        return f"error: cannot read file: {display_path}"
 
     diff_mode = bool(args.get("diff", False))
     if diff_mode and (args.get("line_start") is not None or args.get("line_end") is not None):
@@ -70,8 +81,8 @@ def read(args: Any) -> str:
         diff_lines = list(difflib.unified_diff(
             previous.splitlines(keepends=True),
             content.splitlines(keepends=True),
-            fromfile=f"{path} (previous)",
-            tofile=f"{path} (current)",
+            fromfile=f"{display_path} (previous)",
+            tofile=f"{display_path} (current)",
         ))
         _track_file_version(path, content)
         _LAST_PATCH_HASH.pop(path, None)
@@ -220,7 +231,7 @@ def batch_read(args: Any) -> str:
 
     results = []
     for p in paths:
-        results.append(f"\n=== FILE: {p} ===")
+        results.append(f"\n=== FILE: {to_display_path(str(p))} ===")
         # Reuse read logic for each file
         file_result = read({"path": p})
         results.append(file_result)
