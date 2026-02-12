@@ -293,7 +293,7 @@ def apply_patch_fn(args: Any) -> str:
                 return (
                     f"error: repeated patch detected for {to_display_path(vpath)}; "
                     "do not repeat the same patch. Re-read the file and use "
-                    "a different patch with correct context, or switch to edit/write."
+                    "a different patch with correct context, or switch to another available mutation tool."
                 )
 
         idx = 1
@@ -354,13 +354,13 @@ def apply_patch_fn(args: Any) -> str:
                     state_line = _mutation_state_line(mutation)
                     hint = ""
                     if noop_n >= 2:
-                        hint = " STOP using apply_patch for this file; switch to edit or write."
+                        hint = " STOP using apply_patch for this file; switch to another available mutation tool."
                     updated_display = to_display_path(updated)
                     return (
                         f"error: patch produced no changes for {updated_display} (no-op). "
                         f"The file content is identical before and after.{hint}\n"
                         "ACTION: read the file, then create a patch that actually modifies content, "
-                        "or use edit/write.\n"
+                        "or use another available mutation tool.\n"
                         f"{decision_hint}\n"
                         f"{state_brief}\n"
                         f"{state_line}"

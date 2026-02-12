@@ -1,0 +1,5 @@
+ts	phase	variant	agent	run	pass_any	pass1	tasks	outcomes	run_dir	notes
+2026-02-12 19:53:00	patch	P0_patch_prompt	qwen3-coder-next-bf16-patch-only	1	0	0	0	ABORTED	benchmark/tmp.benchmark/2026-02-12-18-50-58--qwen3-coder-next-bf16-patch-only-mlx-2026-02-12-19-50-58	aborted_long_loop env=
+2026-02-12 19:59:13	patch	P0_patch_prompt_react	qwen3-coder-next-bf16-patch-only	1	0	0	0	ABORTED	benchmark/tmp.benchmark/2026-02-12-18-57-16--qwen3-coder-next-bf16-patch-only-mlx-2026-02-12-19-57-16	aborted_react_only env=
+2026-02-12 20:02:47	patch	P0_patch_prompt_react_afterfix	qwen3-coder-next-bf16-patch-only	1	0	0	1	react:F	benchmark/tmp.benchmark/2026-02-12-19-00-05--qwen3-coder-next-bf16-patch-only-mlx-2026-02-12-20-00-05	tries=1,max_turns=8,max_tokens=4000
+2026-02-12 20:04:07	patch	P2_patch_baseprompt_react_afterfix	qwen3-coder-next-bf16-patch-only-baseprompt	1	0	0	1	react:F	benchmark/tmp.benchmark/2026-02-12-19-02-57--qwen3-coder-next-bf16-patch-only-baseprompt-mlx-2026-02-12-20-02-57	tries=1,max_turns=8,max_tokens=4000

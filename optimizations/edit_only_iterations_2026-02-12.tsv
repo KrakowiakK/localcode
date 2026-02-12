@@ -1,0 +1,6 @@
+run_id	agent	prompt	variant	tasks	tries	result_summary	notes
+2026-02-12-18-50-55	mlx/qwen3-coder-next-bf16-edit-only	qwen3-coder-edit-only	A_no_write_hints	react,promises,rational-numbers	1	FFF (0/3)	Initial edit-only baseline after prompt/profile cleanup
+2026-02-12-18-53-32	mlx/qwen3-coder-next-bf16-edit-only	qwen3-coder-edit-only	B_no_write_hints	react,promises,rational-numbers	3	FP+FP+FP (Pass@2=3/3)	Best run in this batch; stable correction on try2
+2026-02-12-18-58-43	mlx/qwen3-coder-next-bf16-edit-only	qwen3-coder-edit-only	C_snapshot_notfound	react,promises,rational-numbers	3	promises=FFF,rational=FP,react=FP (2/3)	Regression; occasional unknown run tool and longer drift
+2026-02-12-19-07-24	mlx/qwen3-coder-next-bf16-edit-only	qwen3-coder-edit-only	A_repeat	react,promises,rational-numbers	3	incomplete (aborted)	Hung continuation during promises; aborted for iteration speed
+2026-02-12-19-14-55	mlx/qwen3-coder-next-bf16-edit-only	qwen3-coder-edit-only	A_with_prompt_guard	only promises	3	incomplete (aborted)	Prompt guard did not quickly resolve promises drift; aborted

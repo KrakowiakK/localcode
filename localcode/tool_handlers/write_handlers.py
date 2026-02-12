@@ -5,6 +5,7 @@ File writing tool handlers: write(), edit().
 import os
 import hashlib
 import difflib
+import json
 import re
 import subprocess
 import tempfile
@@ -67,6 +68,20 @@ def _edit_success_snippet_enabled() -> bool:
 
 def _write_success_snippet_enabled() -> bool:
     raw = str(os.environ.get("LOCALCODE_WRITE_SNIPPET_SUCCESS", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _write_spec_focus_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_WRITE_SPEC_FOCUS", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _write_spec_contract_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_WRITE_SPEC_CONTRACT", "")).strip().lower()
     if not raw:
         return False
     return raw not in {"0", "false", "no", "off"}
@@ -348,6 +363,155 @@ def _companion_spec_paths(path: str) -> List[str]:
     return [candidate for candidate in candidates if os.path.exists(candidate)]
 
 
+def _spec_focus_hint(path: str) -> str:
+    companion_specs = _companion_spec_paths(path)
+    if not companion_specs:
+        return ""
+
+    spec_path = companion_specs[0]
+    try:
+        with open(spec_path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except Exception:
+        return ""
+
+    title_re = re.compile(
+        r"\b(?:x?test|x?it)\s*\(\s*([\"'])(?P<title>.+?)\1",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    titles: List[str] = []
+    seen = set()
+    for match in title_re.finditer(content):
+        title = " ".join(match.group("title").split())
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        titles.append(title)
+        if len(titles) >= 48:
+            break
+
+    if not titles:
+        return ""
+
+    selected: List[str] = []
+    for item in titles[:2]:
+        if item not in selected:
+            selected.append(item)
+    for item in titles[-2:]:
+        if item not in selected:
+            selected.append(item)
+
+    shortened = [item[:90] + ("..." if len(item) > 90 else "") for item in selected]
+    payload = {
+        "spec": to_display_path(spec_path),
+        "tests": len(titles),
+        "focus": shortened,
+    }
+    return "spec_focus: " + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _extract_js_imported_symbols(spec_content: str, source_basename: str) -> List[str]:
+    pattern = re.compile(
+        r"import\s*\{\s*(?P<names>[^}]+)\s*\}\s*from\s*['\"](?P<module>[^'\"]+)['\"]",
+        re.IGNORECASE,
+    )
+    symbols: List[str] = []
+    seen = set()
+    for match in pattern.finditer(spec_content):
+        module = match.group("module").strip()
+        module_base = os.path.basename(module)
+        if module_base != source_basename and module_base != f"{source_basename}.js":
+            continue
+        names_part = match.group("names")
+        for raw_name in names_part.split(","):
+            name = raw_name.strip()
+            if not name:
+                continue
+            if " as " in name:
+                name = name.split(" as ", 1)[1].strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            symbols.append(name)
+    return symbols
+
+
+def _extract_spec_called_api(spec_content: str, imported_symbols: List[str]) -> Tuple[List[str], List[str]]:
+    if not imported_symbols:
+        return [], []
+    method_calls: List[str] = []
+    function_calls: List[str] = []
+    seen_methods = set()
+    seen_functions = set()
+    for symbol in imported_symbols:
+        escaped = re.escape(symbol)
+        method_patterns = [
+            rf"\bnew\s+{escaped}\s*\([^)]*\)\s*\.\s*([A-Za-z_]\w*)\s*\(",
+            rf"\b{escaped}\s*\.\s*([A-Za-z_]\w*)\s*\(",
+        ]
+        for pat in method_patterns:
+            for m in re.finditer(pat, spec_content):
+                name = m.group(1)
+                if name and name not in seen_methods:
+                    seen_methods.add(name)
+                    method_calls.append(name)
+        for m in re.finditer(rf"(?<!\.)\b{escaped}\s*\(", spec_content):
+            prefix = spec_content[max(0, m.start() - 8):m.start()]
+            if re.search(r"\bnew\s+$", prefix):
+                continue
+            full = m.group(0)
+            if full and symbol not in seen_functions:
+                seen_functions.add(symbol)
+                function_calls.append(symbol)
+    return method_calls, function_calls
+
+
+def _spec_contract_hint(path: str, source_content: str) -> str:
+    companion_specs = _companion_spec_paths(path)
+    if not companion_specs:
+        return ""
+    spec_path = companion_specs[0]
+    try:
+        with open(spec_path, "r", encoding="utf-8") as fh:
+            spec_content = fh.read()
+    except Exception:
+        return ""
+
+    source_basename = os.path.splitext(os.path.basename(path))[0]
+    imported_symbols = _extract_js_imported_symbols(spec_content, source_basename)
+    methods, functions = _extract_spec_called_api(spec_content, imported_symbols)
+    if not methods and not functions:
+        return ""
+
+    missing_methods: List[str] = []
+    for method in methods:
+        if not re.search(rf"\b{re.escape(method)}\s*\(", source_content):
+            missing_methods.append(method)
+
+    missing_functions: List[str] = []
+    for fn_name in functions:
+        if re.search(rf"\b(?:export\s+)?class\s+{re.escape(fn_name)}\b", source_content):
+            continue
+        if not re.search(
+            rf"\b(?:export\s+)?(?:async\s+)?function\s+{re.escape(fn_name)}\s*\(",
+            source_content,
+        ):
+            if not re.search(
+                rf"\b(?:export\s+)?(?:const|let|var)\s+{re.escape(fn_name)}\s*=\s*",
+                source_content,
+            ):
+                missing_functions.append(fn_name)
+
+    payload = {
+        "spec": to_display_path(spec_path),
+        "api_calls": len(methods) + len(functions),
+        "missing_methods": missing_methods[:8],
+        "missing_functions": missing_functions[:8],
+    }
+    return "spec_contract: " + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
 def _write_read_precondition_error(path: str) -> Optional[str]:
     if not _enforce_read_before_write_enabled():
         return None
@@ -527,6 +691,12 @@ def _changed_line_preview(previous: str, current: str, max_lines: int = 6) -> st
     return "\n".join(out)
 
 
+def _changed_symbols_line(symbols: List[str]) -> str:
+    if not symbols:
+        return "changed_symbols: -"
+    return "changed_symbols: " + ", ".join(symbols[:10])
+
+
 def _current_file_sha(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -631,6 +801,8 @@ def write(args: Any) -> str:
 
     # Optional test injection for weak models (off by default).
     spec_inject = _find_and_read_spec() if _inject_tests_on_write_enabled() else ""
+    spec_focus = _spec_focus_hint(path) if _write_spec_focus_enabled() else ""
+    spec_contract = _spec_contract_hint(path, content) if _write_spec_contract_enabled() else ""
     write_hint = ""
     if _tool_hints_enabled():
         write_hint = "\nHint: optionally read the file to verify, then continue or finish."
@@ -660,24 +832,53 @@ def write(args: Any) -> str:
                 f"\nloop_guard: repeated full-file write streak={mutation.get('write_streak_for_file')} "
                 "on this file; prefer edit/apply_patch or finish."
             )
-        lines: List[str] = [
+        symbols_line = _changed_symbols_line(list(mutation.get("changed_symbols") or []))
+        if _write_verbose_state_enabled():
+            lines: List[str] = [
+                f"ok: created {display_path}, +{additions} lines",
+                file_state,
+                decision_hint,
+                state_brief,
+                state_line,
+                symbols_line,
+            ]
+            if _write_success_snippet_enabled():
+                _append_region_snippet(lines, "", content)
+            else:
+                lines.append(_changed_line_preview("", content))
+            if loop_hint.strip():
+                lines.append(loop_hint.strip())
+            if spec_inject.strip():
+                lines.append(spec_inject.strip())
+            if spec_focus.strip():
+                lines.append(spec_focus.strip())
+            if spec_contract.strip():
+                lines.append(spec_contract.strip())
+            if write_hint.strip():
+                lines.append(write_hint.strip())
+            return "\n".join(lines)
+
+        out: List[str] = [
             f"ok: created {display_path}, +{additions} lines",
             file_state,
-            decision_hint,
-            state_brief,
-            state_line,
+            _change_summary("", content),
+            symbols_line,
         ]
         if _write_success_snippet_enabled():
-            _append_region_snippet(lines, "", content)
+            _append_region_snippet(out, "", content)
         else:
-            lines.append(_changed_line_preview("", content))
+            out.append(_changed_line_preview("", content))
         if loop_hint.strip():
-            lines.append(loop_hint.strip())
+            out.append(loop_hint.strip())
         if spec_inject.strip():
-            lines.append(spec_inject.strip())
+            out.append(spec_inject.strip())
+        if spec_focus.strip():
+            out.append(spec_focus.strip())
+        if spec_contract.strip():
+            out.append(spec_contract.strip())
         if write_hint.strip():
-            lines.append(write_hint.strip())
-        return "\n".join(lines)
+            out.append(write_hint.strip())
+        return "\n".join(out)
 
     old_lines = old_content.count("\n")
     new_lines = content.count("\n")
@@ -709,6 +910,7 @@ def write(args: Any) -> str:
             "on this file; prefer edit/apply_patch or finish."
         )
     summary = _change_summary(old_content, content)
+    symbols_line = _changed_symbols_line(symbols)
     snippet_lines: List[str] = []
     if _write_success_snippet_enabled():
         _append_region_snippet(snippet_lines, old_content, content)
@@ -721,6 +923,7 @@ def write(args: Any) -> str:
             state_brief,
             state_line,
             summary,
+            symbols_line,
         ]
         if snippet_lines:
             lines.extend(snippet_lines)
@@ -730,25 +933,32 @@ def write(args: Any) -> str:
             lines.append(loop_hint.strip())
         if spec_inject.strip():
             lines.append(spec_inject.strip())
+        if spec_focus.strip():
+            lines.append(spec_focus.strip())
+        if spec_contract.strip():
+            lines.append(spec_contract.strip())
         if write_hint.strip():
             lines.append(write_hint.strip())
         return "\n".join(lines)
 
     out: List[str] = [
         f"ok: updated {display_path}, +{additions} -{removals} lines",
+        file_state,
         summary,
+        symbols_line,
     ]
     if snippet_lines:
         out.extend(snippet_lines)
     else:
         out.append(changed_preview)
-    out.extend([
-        "Action: continue with the next targeted change, or finish if complete.",
-    ])
     if loop_hint.strip():
         out.append(loop_hint.strip())
     if spec_inject.strip():
         out.append(spec_inject.strip())
+    if spec_focus.strip():
+        out.append(spec_focus.strip())
+    if spec_contract.strip():
+        out.append(spec_contract.strip())
     if write_hint.strip():
         out.append(write_hint.strip())
     return "\n".join(out)
@@ -820,7 +1030,7 @@ def edit(args: Any) -> str:
         if noop_n == 1:
             return (
                 f"error: no changes - old equals new in {basename}. "
-                "Use a different 'new' value, or switch to write_file for full rewrite.\n"
+                "Use a different 'new' value, or provide a larger old/new block for broader edits.\n"
                 f"{decision_hint}\n"
                 f"{state_brief}\n"
                 f"{state_line}"
@@ -852,7 +1062,7 @@ def edit(args: Any) -> str:
             f"error: old text was not found in {basename}.\n"
             "This usually means whitespace, line-break, or Unicode punctuation mismatch.\n"
             f"Here is the current content of {basename}:\n{text}\n"
-            f"Action: copy the exact text (including whitespace) from above, or use write_file to rewrite the file.{read_hint}"
+            f"Action: copy the exact text (including whitespace) from above, then retry edit with a larger exact old/new block if needed.{read_hint}"
         )
 
     count = text.count(resolved_old)

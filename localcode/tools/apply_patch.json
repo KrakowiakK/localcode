@@ -5,10 +5,10 @@
     "patch_file"
   ],
   "category": "write",
-  "description": "Apply patch blocks with exact context lines. Use for precise structured edits, especially multi-file or hunk-style updates. If patch fails, re-read and patch current content.",
+  "description": "Apply patch blocks with exact context lines. Use for precise structured edits, especially multi-file or hunk-style updates. If patch fails, re-read and regenerate patch from current content.\n\nRequired patch structure (exact):\n*** Begin Patch\n*** Update File: path/to/file.ext\n@@\n- old line\n+ new line\n*** End Patch\n\nDo NOT use unified diff headers (---/+++). Use *** Update File / *** Add File / *** Delete File sections only.",
   "feedback": {
-    "patch_context_not_found": "ERROR: @@ context line not found in file. Common causes:\n1. @@ has multiple lines (WRONG) - must be ONE single line\n2. @@ is blank or partial (WRONG) - must be complete line from file\n3. Line was modified since last read\nACTION: Call {{tool:read}}({{target}}), then COPY a unique line VERBATIM for @@. For small files, use {{tool:write}} instead.",
-    "patch_context_not_unique": "FORMAT ERROR: {{tool:apply_patch}} failed: patch context not unique.\nACTION: Call {{tool:read}}(path) for {{target}}, then retry {{tool:apply_patch}} with MORE unique context lines, OR switch to {{tool:edit}} / {{tool:write}} if the file is small.",
+    "patch_context_not_found": "ERROR: @@ context line not found in file. Common causes:\n1. @@ has multiple lines (WRONG) - must be ONE single line\n2. @@ is blank or partial (WRONG) - must be complete line from file\n3. Line was modified since last read\nACTION: Call {{tool:read}}({{target}}), then COPY a unique line VERBATIM for @@ and retry {{tool:apply_patch}}.",
+    "patch_context_not_unique": "FORMAT ERROR: {{tool:apply_patch}} failed: patch context not unique.\nACTION: Call {{tool:read}}(path) for {{target}}, then retry {{tool:apply_patch}} with MORE unique context lines.",
     "must_read_before_patching": "FORMAT ERROR: {{tool:apply_patch}} failed due to stale context.\nACTION: Call {{tool:read}}(path) for {{target}}, then retry {{tool:apply_patch}} with current context lines.",
     "invalid_patch_format": "FORMAT ERROR: {{tool:apply_patch}} failed: invalid patch format.\nACTION: Provide a COMPLETE patch with *** Begin Patch and *** End Patch markers and valid context lines. Re-read the target file and retry {{tool:apply_patch}}.",
     "unexpected_patch_line": "FORMAT ERROR: {{tool:apply_patch}} failed: unexpected patch line.\nACTION: Ensure each line starts with ' ', '+', or '-' and include a valid @@ context header. Re-read the target file and retry {{tool:apply_patch}}.",

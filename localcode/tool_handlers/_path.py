@@ -124,14 +124,32 @@ def _is_benchmark_mode() -> bool:
 
 
 def _find_file_in_sandbox(filename: str) -> Optional[str]:
-    """Try to find a file by name within the sandbox directory."""
+    """Try to find a file by name, preferring current working directory scope."""
     sandbox = _state.SANDBOX_ROOT
     if not sandbox or not filename:
         return None
-    for root, dirs, files in os.walk(sandbox):
-        dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS]
-        if filename in files:
-            return os.path.join(root, filename)
+
+    sandbox_real = os.path.realpath(sandbox)
+    cwd_real = os.path.realpath(os.getcwd())
+
+    search_roots = []
+    if _is_path_within_sandbox(cwd_real, sandbox_real):
+        search_roots.append(cwd_real)
+
+    # Optional compatibility mode: allow global sandbox search.
+    # Default is scoped search to avoid cross-task/file confusion.
+    allow_global = str(os.environ.get("LOCALCODE_PATH_AUTOCORRECT_GLOBAL", "")).strip().lower() in _TRUTHY
+    if allow_global and sandbox_real not in search_roots:
+        search_roots.append(sandbox_real)
+
+    if not search_roots:
+        search_roots.append(sandbox_real)
+
+    for search_root in search_roots:
+        for root, dirs, files in os.walk(search_root):
+            dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS]
+            if filename in files:
+                return os.path.join(root, filename)
     return None
 
 

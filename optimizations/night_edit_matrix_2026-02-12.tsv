@@ -1,0 +1,4 @@
+ts	phase	variant	run	pass_any	pass1	tasks	outcomes	run_dir	notes
+2026-02-12 19:36:46	edit	E0_base_r2	1	2	1	3	promises:FF,rational-numbers:FP,react:P	benchmark/tmp.benchmark/2026-02-12-18-32-36--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-19-32-36	env=
+2026-02-12 19:40:43	edit	E1_edit_verbose_r2	1	2	1	3	promises:FF,rational-numbers:FP,react:P	benchmark/tmp.benchmark/2026-02-12-18-36-47--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-19-36-46	env=LOCALCODE_EDIT_VERBOSE_STATE=1
+2026-02-12 19:44:17	edit	E2_verbose_no_snippet_r2	1	2	1	3	promises:FF,rational-numbers:FP,react:P	benchmark/tmp.benchmark/2026-02-12-18-40-43--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-19-40-43	env=LOCALCODE_EDIT_VERBOSE_STATE=1 LOCALCODE_EDIT_SNIPPET_SUCCESS=0

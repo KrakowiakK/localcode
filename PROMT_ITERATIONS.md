@@ -81,3 +81,144 @@ Results:
 Notes:
 1. No tool loops observed in this batch.
 2. Behavior is highly stable across all 20 runs.
+
+## Tool Feedback Matrix (2026-02-12, 24 runs, 3-task mix)
+
+Tasks:
+- `react`
+- `promises`
+- `rational-numbers`
+
+Command pattern:
+- `./bin/run-benchmark.sh qwen3-coder-next-bf16 -k react,promises,rational-numbers`
+
+Variants and outcomes (4 runs each):
+
+| Variant | Env delta | Avg pass (/3) | React | Promises | Rational |
+|---|---|---:|---:|---:|---:|
+| `base` | `verbose=1,spec_focus=1,snippet=0,enforce=1` | 1.00 | 4/4 | 0/4 | 0/4 |
+| `compact` | `verbose=0` | 1.00 | 4/4 | 0/4 | 0/4 |
+| `contract` | `spec_contract=1` | 1.00 | 4/4 | 0/4 | 0/4 |
+| `noenforce` | `enforce_read_before_write=0` | 1.00 | 4/4 | 0/4 | 0/4 |
+| `snippet` | `write_snippet_success=1` | 0.00 | 0/4 | 0/4 | 0/4 |
+| `nospec` | `spec_focus=0` | 0.00 | 0/4 | 0/4 | 0/4 |
+
+Takeaways:
+1. `spec_focus` is required for stable `react`.
+2. `write` snippet on success is strongly harmful in this setup.
+3. `spec_contract` and `enforce_read_before_write` are quality-neutral on this 3-task mix.
+4. No variant improved `promises` or `rational-numbers`.
+
+## Extra Iterations After Matrix (2026-02-12)
+
+Experiments:
+1. Aggressive `spec_focus` (edge-tag enriched) on all tasks.
+2. Conditional `spec_focus` (legacy for small specs, edge-aware for large specs).
+3. `review_hint` after first write on larger specs.
+
+Results:
+1. Aggressive `spec_focus` regressed to `0/3` in early runs and was rolled back.
+2. Conditional `spec_focus` restored baseline stability (`1/3`, `react` stable), but no net gain on `promises`/`rational`.
+3. `review_hint` also regressed (`0/3` in early runs) and was rolled back.
+
+Current stable baseline remains:
+- `LOCALCODE_WRITE_VERBOSE_STATE=1`
+- `LOCALCODE_WRITE_SPEC_FOCUS=1`
+- `LOCALCODE_WRITE_SNIPPET_SUCCESS=0`
+- `LOCALCODE_ENFORCE_READ_BEFORE_WRITE=1`
+
+## Edit-Only Iterations (2026-02-12)
+
+Goal:
+- Evaluate non-`write` editing behavior empirically (`edit` only) and reduce tool-call noise without task-specific hints.
+
+Changes tested:
+1. New agent profile: `mlx/qwen3-coder-next-bf16-edit-only` (tools: `ls, read, edit, glob, grep, search, finish`).
+2. Dedicated prompt: `prompts/qwen3-coder-edit-only.txt`.
+3. Removed `write` suggestions from `edit` tool description/feedback and `edit()` runtime messages.
+4. Tried (then rolled back) line-numbered full-file snapshot on `edit` not-found path.
+
+Runs:
+
+| Run | Config state | Tasks | Tries | Outcome |
+|---|---|---|---:|---|
+| A | edit-only prompt + no `write` hints | `react,promises,rational-numbers` | 1 | `0/3` (`FFF`) |
+| B | same as A | `react,promises,rational-numbers` | 3 | `3/3` at `Pass@2` (`FP,FP,FP`) |
+| C | A + line-numbered snapshot on edit-not-found | `react,promises,rational-numbers` | 3 | `2/3` (`FFF,FP,FP`) + occasional unknown `run` |
+
+Task-level pattern:
+- `react`: generally stable recovery in try2 (`FAIL -> PASS`) with `read/read/edit/edit/finish` then short corrective pass.
+- `rational-numbers`: similar `FAIL -> PASS` via one corrective `edit`.
+- `promises`: highest variance; sometimes converges in try2, sometimes drifts into long continuation with premature `finish` and occasional unknown tool call.
+
+Conclusions:
+1. The high-value change was removing `write` references in edit-only mode (prevents invalid tool attraction).
+2. Line-numbered full snapshot for not-found did **not** improve stability and increased drift/noise in `promises` (rolled back).
+3. Best known edit-only behavior from this batch is config state **A/B** (without snapshot extension).
+4. `edit`-only is workable for diagnostics, but not yet as stable as mixed-mode baseline on harder tasks.
+
+## Night Iterations — Edit/Patch/Mixed (2026-02-12)
+
+Data files:
+- `optimizations/night_edit_matrix_2026-02-12.tsv`
+- `optimizations/night_patch_matrix_2026-02-12.tsv`
+- `optimizations/night_mixed_matrix_2026-02-12.tsv`
+
+### 1) Edit-only re-check (3 tasks, tries=2)
+
+Variants:
+- `E0_base_r2`
+- `E1_edit_verbose_r2`
+- `E2_verbose_no_snippet_r2`
+
+Observed outcome (all three variants identical):
+- `pass_any=2/3`, `pass1=1/3`
+- Outcomes: `promises:FF`, `rational-numbers:FP`, `react:P`
+
+Interpretation:
+1. For this model/profile, edit verbosity/snippet toggles did not change quality on this 3-task set.
+2. Main bottleneck remains `promises` (no try2 recovery in this slice), not tool loop stability.
+
+### 2) Patch-focused experiments
+
+Initial patch-only runs showed repeated format drift:
+- invalid patch envelope,
+- unified diff header usage (`---/+++`),
+- unknown `write` fallback calls.
+
+Applied generic patch improvements:
+1. `apply_patch` tool description now contains strict required structure and explicit "no unified diff headers" guidance.
+2. Patch handler feedback no longer suggests `edit/write` directly in repeated/no-op patch messages (uses neutral "another available mutation tool").
+3. Added `patch-only` prompt with explicit patch example.
+4. Reduced patch-only profile limits (`max_turns=8`, `max_tokens=4000`) for faster loop diagnosis.
+
+After fix (react, tries=1):
+- `P0_patch_prompt_react_afterfix`: `react:F`
+- `P2_patch_baseprompt_react_afterfix`: `react:F`
+
+Important behavior change:
+- Model moved from envelope-level failures ("missing Begin Patch") to valid envelope usage with real `apply_patch` success events.
+- Patch quality still insufficient to pass task, but format compliance improved.
+
+### 3) Mixed-profile validation (global)
+
+Quick checks on `qwen3-coder-next-bf16`:
+- `M0_base` (`tries=1`): `0/3`
+- `M1_edit_verbose` (`tries=1`): `0/3`
+- `M0_base_r2` (`tries=2`): `pass_any=2/3`, outcomes `promises:FP`, `rational-numbers:FP`, `react:FF`
+
+Interpretation:
+1. No evidence that the night `edit` toggles improve mixed profile quality.
+2. Mixed profile still recovers in try2 on `promises` and `rational-numbers`.
+3. `react` remained unstable in this particular run slice.
+
+### Baseline decisions after night run
+
+Keep:
+1. Edit feedback cleanup that removed `write` nudges in edit-only flows.
+2. Improved `apply_patch` description with strict format example.
+3. Neutralized patch handler fallback wording (no forced `edit/write` suggestion).
+
+Do not adopt as baseline:
+1. Patch-only profile as primary benchmark mode (insufficient task pass quality).
+2. Edit verbosity/snippet toggles as default quality levers (no measured gain in this slice).

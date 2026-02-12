@@ -1,0 +1,43 @@
+{
+  "name": "mlx/qwen3-coder-next-bf16-patch-only",
+  "description": "Qwen3 Coder Next bf16 diagnostic profile with patch-only file mutation (no write/edit).",
+  "prompt": "prompts/qwen3-coder-patch-only.txt",
+  "model": "/Users/pimpc181/.lmstudio/models/mlx-community/Qwen3-Coder-Next-bf16",
+  "url": "http://localhost:1236/v1/chat/completions",
+  "temperature": 0.0,
+  "top_p": 0.9,
+  "top_k": 30,
+  "min_p": 0.01,
+  "max_tokens": 4000,
+  "tool_choice": "auto",
+  "cache": false,
+  "tool_name_style": "canonical",
+  "auto_tool_call_on_failure": true,
+  "require_code_change": true,
+  "min_tool_calls": 1,
+  "max_turns": 8,
+  "max_format_retries": 2,
+  "max_batch_tool_calls": 5,
+  "history_max_messages": 50,
+  "send_tool_categories": false,
+  "tools": [
+    "ls",
+    "read",
+    "apply_patch",
+    "glob",
+    "grep",
+    "search",
+    "finish"
+  ],
+  "server_config": {
+    "model_path": "~/.lmstudio/models/mlx-community/Qwen3-Coder-Next-bf16",
+    "context_window": 32768,
+    "server_type": "mlx",
+    "extra_args": [
+      "--chat-template-args",
+      "{\"enable_thinking\":false}",
+      "--log-level",
+      "INFO"
+    ]
+  }
+}

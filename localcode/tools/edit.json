@@ -5,12 +5,12 @@
     "edit_file"
   ],
   "category": "write",
-  "description": "Replace one exact snippet in an existing file. Use this after read/write for small corrective changes. If old text is not found, read current file and retry with exact text.\n\nAccepted arg aliases:\n- old_str / old_string -> old\n- new_str / new_string -> new",
+  "description": "Replace one exact snippet in an existing file. Use this after read for targeted corrective changes. If old text is not found, read current file and retry with exact text.\n\nAccepted arg aliases:\n- old_str / old_string -> old\n- new_str / new_string -> new",
   "feedback": {
     "must_read_before_editing": "FORMAT ERROR: {{tool:edit}} failed due to stale context.\nACTION: Call {{tool:read}}(path) for {{target}}, then retry {{tool:edit}} with exact current text.",
-    "old_string_not_found": "ERROR: 'old' string not found in file. Common causes:\n1. Whitespace mismatch (tabs vs spaces, trailing spaces)\n2. String was modified since last read\n3. Guessing content instead of copying from read output\nACTION: Call {{tool:read}}({{target}}), then COPY the exact substring. For small files, use {{tool:write}} instead.",
+    "old_string_not_found": "ERROR: 'old' string not found in file. Common causes:\n1. Whitespace mismatch (tabs vs spaces, trailing spaces)\n2. String was modified since last read\n3. Guessing content instead of copying from read output\nACTION: Call {{tool:read}}({{target}}), then COPY the exact substring. If the change is broad, use a larger exact old/new block.",
     "old_string_not_unique": "FORMAT ERROR: {{tool:edit}} failed: old_string is not unique.\nACTION: Call {{tool:read}}(path) for {{target}} (use {{tool:read}}, NOT {{tool:search}}), then retry with an exact unique substring, OR set all=true if you intend to replace all occurrences.",
-    "old_equals_new": "ERROR: {{tool:edit}} called with 'old' identical to 'new' - no change would occur.\nThis usually means you want to MODIFY the code, not copy it unchanged.\nACTION:\n1. Re-read the file with {{tool:read}}({{target}})\n2. Identify the EXACT text you want to CHANGE (old)\n3. Write the MODIFIED version (new) - it must be DIFFERENT from old\n4. If the file already has correct content, the task may be complete - verify and move on.\nTIP: For small files, consider using {{tool:write}} to rewrite the entire file."
+    "old_equals_new": "ERROR: {{tool:edit}} called with 'old' identical to 'new' - no change would occur.\nThis usually means you want to MODIFY the code, not copy it unchanged.\nACTION:\n1. Re-read the file with {{tool:read}}({{target}})\n2. Identify the EXACT text you want to CHANGE (old)\n3. Write the MODIFIED version (new) - it must be DIFFERENT from old\n4. If the file already has correct content, the task may be complete - verify and move on."
   },
   "additionalProperties": false,
   "parameters": {

@@ -215,6 +215,134 @@ class TestWriteReadPrecondition(unittest.TestCase):
             self.assertTrue(second.startswith("ok:"), second)
 
 
+class TestWriteSpecFocus(unittest.TestCase):
+    """Optional spec_focus feedback after write."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.src = os.path.join(self.temp_dir, "sample.js")
+        self.spec = os.path.join(self.temp_dir, "sample.spec.js")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("// source\n")
+        with open(self.spec, "w", encoding="utf-8") as f:
+            f.write(
+                "test('handles basic input', () => {});\n"
+                "test('rejects invalid input', () => {});\n"
+                "test('resolves when given no arguments', () => {});\n"
+            )
+        agent.FILE_VERSIONS.clear()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir)
+        agent.FILE_VERSIONS.clear()
+
+    def test_write_includes_spec_focus_when_enabled(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LOCALCODE_ENFORCE_READ_BEFORE_WRITE": "1",
+                "LOCALCODE_WRITE_SPEC_FOCUS": "1",
+            },
+        ):
+            _ = agent.read({"path": self.src})
+            _ = agent.read({"path": self.spec})
+            out = agent.write({"path": self.src, "content": "export const x = 1;\n"})
+        self.assertIn("spec_focus:", out)
+        self.assertIn("sample.spec.js", out)
+        self.assertIn("rejects invalid input", out)
+
+class TestWriteSpecContract(unittest.TestCase):
+    """Optional spec_contract feedback after write."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.src = os.path.join(self.temp_dir, "contract.js")
+        self.spec = os.path.join(self.temp_dir, "contract.spec.js")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("export class Contract {}\n")
+        with open(self.spec, "w", encoding="utf-8") as f:
+            f.write(
+                "import { Contract } from './contract';\n"
+                "test('calls foo', () => {\n"
+                "  expect(new Contract().foo()).toEqual(1);\n"
+                "});\n"
+            )
+        agent.FILE_VERSIONS.clear()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir)
+        agent.FILE_VERSIONS.clear()
+
+    def test_write_includes_spec_contract_with_missing_method(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LOCALCODE_ENFORCE_READ_BEFORE_WRITE": "1",
+                "LOCALCODE_WRITE_SPEC_CONTRACT": "1",
+            },
+        ):
+            _ = agent.read({"path": self.src})
+            _ = agent.read({"path": self.spec})
+            out = agent.write({"path": self.src, "content": "export class Contract {\n  bar() { return 2; }\n}\n"})
+        self.assertIn("spec_contract:", out)
+        self.assertIn("contract.spec.js", out)
+        self.assertIn("missing_methods", out)
+        self.assertIn("foo", out)
+        contract_line = [line for line in out.splitlines() if line.startswith("spec_contract: ")][0]
+        payload = json.loads(contract_line.split("spec_contract: ", 1)[1])
+        self.assertEqual(payload.get("missing_functions"), [])
+
+class TestPathAutocorrectScope(unittest.TestCase):
+    """Path autocorrect should stay in current task scope by default."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.prev_cwd = os.getcwd()
+        self.task_a = os.path.join(self.temp_dir, "task-a")
+        self.task_b = os.path.join(self.temp_dir, "task-b")
+        os.makedirs(self.task_a, exist_ok=True)
+        os.makedirs(self.task_b, exist_ok=True)
+        _inner.SANDBOX_ROOT = self.temp_dir
+
+    def tearDown(self):
+        import shutil
+        os.chdir(self.prev_cwd)
+        _inner.SANDBOX_ROOT = None
+        agent.FILE_VERSIONS.clear()
+        shutil.rmtree(self.temp_dir)
+
+    def test_read_autocorrect_does_not_jump_to_other_task_by_default(self):
+        outside = os.path.join(self.task_b, "shared.spec.js")
+        with open(outside, "w", encoding="utf-8") as f:
+            f.write("outside content\n")
+
+        os.chdir(self.task_a)
+        result = agent.read({"path": "shared.spec.js"})
+        self.assertIn("error", result.lower())
+        self.assertIn("file not found", result.lower())
+
+    def test_read_autocorrect_can_use_global_scope_when_enabled(self):
+        outside = os.path.join(self.task_b, "shared.spec.js")
+        with open(outside, "w", encoding="utf-8") as f:
+            f.write("outside content\n")
+
+        os.chdir(self.task_a)
+        with patch.dict(os.environ, {"LOCALCODE_PATH_AUTOCORRECT_GLOBAL": "1"}):
+            result = agent.read({"path": "shared.spec.js"})
+        self.assertIn("outside content", result)
+
+    def test_read_autocorrect_finds_file_in_current_task_scope(self):
+        local = os.path.join(self.task_a, "local.txt")
+        with open(local, "w", encoding="utf-8") as f:
+            f.write("local content\n")
+
+        os.chdir(self.task_a)
+        result = agent.read({"path": "nested/does-not-exist/local.txt"})
+        self.assertIn("local content", result)
+
+
 class TestDisplayPathNormalization(unittest.TestCase):
     """Ensure tool outputs show sandbox-relative paths, not absolute paths."""
 

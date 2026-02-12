@@ -1,0 +1,15 @@
+ts	variant	run	pass	run_dir
+2026-02-12 18:29:22	base	1	1	benchmark/tmp.benchmark/2026-02-12-17-28-42--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-28-42
+2026-02-12 18:30:00	base	2	1	benchmark/tmp.benchmark/2026-02-12-17-29-22--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-29-22
+2026-02-12 18:30:38	base	3	1	benchmark/tmp.benchmark/2026-02-12-17-30-00--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-30-00
+2026-02-12 18:31:16	base	4	1	benchmark/tmp.benchmark/2026-02-12-17-30-38--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-30-38
+2026-02-12 18:31:55	edit_verbose	1	1	benchmark/tmp.benchmark/2026-02-12-17-31-16--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-31-16
+2026-02-12 18:32:34	edit_verbose	2	1	benchmark/tmp.benchmark/2026-02-12-17-31-55--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-31-55
+2026-02-12 18:33:14	edit_verbose	3	1	benchmark/tmp.benchmark/2026-02-12-17-32-35--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-32-34
+2026-02-12 18:33:53	edit_verbose	4	1	benchmark/tmp.benchmark/2026-02-12-17-33-14--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-33-14
+2026-02-12 18:34:29	no_snippet	1	1	benchmark/tmp.benchmark/2026-02-12-17-33-53--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-33-53
+2026-02-12 18:35:05	no_snippet	2	1	benchmark/tmp.benchmark/2026-02-12-17-34-30--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-34-29
+2026-02-12 18:35:42	no_snippet	3	1	benchmark/tmp.benchmark/2026-02-12-17-35-06--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-35-06
+2026-02-12 18:36:18	no_snippet	4	1	benchmark/tmp.benchmark/2026-02-12-17-35-42--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-35-42
+2026-02-12 18:37:25	verbose_no_snippet	1	1	benchmark/tmp.benchmark/2026-02-12-17-36-19--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-36-19
+2026-02-12 18:38:31	verbose_no_snippet	2	1	benchmark/tmp.benchmark/2026-02-12-17-37-25--qwen3-coder-next-bf16-edit-only-mlx-2026-02-12-18-37-25

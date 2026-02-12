@@ -1,0 +1,4 @@
+ts	phase	variant	agent	run	pass_any	pass1	tasks	outcomes	run_dir	notes
+2026-02-12 20:06:36	mixed	M0_base	qwen3-coder-next-bf16	1	0	0	3	promises:F,rational-numbers:F,react:F	benchmark/tmp.benchmark/2026-02-12-19-04-27--qwen3-coder-next-bf16-mlx-2026-02-12-20-04-27	env=
+2026-02-12 20:08:44	mixed	M1_edit_verbose	qwen3-coder-next-bf16	1	0	0	3	promises:F,rational-numbers:F,react:F	benchmark/tmp.benchmark/2026-02-12-19-06-37--qwen3-coder-next-bf16-mlx-2026-02-12-20-06-37	env=LOCALCODE_EDIT_VERBOSE_STATE=1
+2026-02-12 20:12:55	mixed	M0_base_r2	qwen3-coder-next-bf16	1	2	0	3	promises:FP,rational-numbers:FP,react:FF	benchmark/tmp.benchmark/2026-02-12-19-09-13--qwen3-coder-next-bf16-mlx-2026-02-12-20-09-13	tries=2
