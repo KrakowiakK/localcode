@@ -51,6 +51,218 @@ def _inject_tests_on_write_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _edit_success_snippet_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_EDIT_SNIPPET_SUCCESS", "")).strip().lower()
+    if not raw:
+        return True
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _edit_verbose_state_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_EDIT_VERBOSE_STATE", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
+
+
+_UNICODE_TRANSLATION_TABLE = str.maketrans({
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201A": "'",
+    "\u201B": "'",
+    "\u2032": "'",
+    "\u2035": "'",
+    "\u201C": '"',
+    "\u201D": '"',
+    "\u201E": '"',
+    "\u201F": '"',
+    "\u2033": '"',
+    "\u2036": '"',
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2012": "-",
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2015": "-",
+    "\u2212": "-",
+    "\u00A0": " ",
+    "\u2002": " ",
+    "\u2003": " ",
+    "\u2004": " ",
+    "\u2005": " ",
+    "\u2006": " ",
+    "\u2007": " ",
+    "\u2008": " ",
+    "\u2009": " ",
+    "\u200A": " ",
+    "\u202F": " ",
+    "\u205F": " ",
+    "\u3000": " ",
+})
+
+
+def _normalize_unicode_for_match(text: str) -> str:
+    if not text:
+        return text
+    return text.translate(_UNICODE_TRANSLATION_TABLE)
+
+
+def _strip_single_trailing_newline(text: str) -> str:
+    if text.endswith("\r\n"):
+        return text[:-2]
+    if text.endswith("\n") or text.endswith("\r"):
+        return text[:-1]
+    return text
+
+
+def _find_unique_unicode_slice(text: str, needle: str) -> Optional[str]:
+    normalized_text = _normalize_unicode_for_match(text)
+    normalized_needle = _normalize_unicode_for_match(needle)
+    if not normalized_needle:
+        return None
+    positions: List[int] = []
+    start = 0
+    while len(positions) < 2:
+        idx = normalized_text.find(normalized_needle, start)
+        if idx < 0:
+            break
+        positions.append(idx)
+        start = idx + 1
+    if len(positions) != 1:
+        return None
+    pos = positions[0]
+    return text[pos: pos + len(needle)]
+
+
+def _find_unique_line_window_slice(
+    text: str,
+    needle: str,
+    transform,
+) -> Optional[str]:
+    haystack_lines = text.splitlines(keepends=True)
+    needle_lines = needle.splitlines(keepends=True)
+    if not haystack_lines or not needle_lines:
+        return None
+    if len(needle_lines) > len(haystack_lines):
+        return None
+
+    hay_noeol = [line.rstrip("\r\n") for line in haystack_lines]
+    needle_noeol = [line.rstrip("\r\n") for line in needle_lines]
+
+    normalized_hay = [transform(line) for line in hay_noeol]
+    normalized_needle = [transform(line) for line in needle_noeol]
+    window = len(normalized_needle)
+
+    matches: List[int] = []
+    for idx in range(len(normalized_hay) - window + 1):
+        if normalized_hay[idx: idx + window] == normalized_needle:
+            matches.append(idx)
+            if len(matches) > 1:
+                return None
+    if not matches:
+        return None
+
+    first = matches[0]
+    selected = haystack_lines[first: first + window]
+    canonical = "".join(selected)
+    if not needle.endswith(("\n", "\r")):
+        canonical = _strip_single_trailing_newline(canonical)
+    return canonical
+
+
+def _resolve_old_text(text: str, old: str) -> Optional[str]:
+    if old in text:
+        return old
+
+    candidates = [old]
+    trimmed = _strip_single_trailing_newline(old)
+    if trimmed and trimmed != old:
+        candidates.append(trimmed)
+
+    for candidate in candidates:
+        if candidate in text:
+            return candidate
+
+        unicode_slice = _find_unique_unicode_slice(text, candidate)
+        if unicode_slice is not None:
+            return unicode_slice
+
+        line_exact = _find_unique_line_window_slice(text, candidate, lambda value: value)
+        if line_exact is not None:
+            return line_exact
+
+        line_trimmed = _find_unique_line_window_slice(text, candidate, lambda value: value.rstrip())
+        if line_trimmed is not None:
+            return line_trimmed
+
+        line_unicode_trimmed = _find_unique_line_window_slice(
+            text,
+            candidate,
+            lambda value: _normalize_unicode_for_match(value).rstrip(),
+        )
+        if line_unicode_trimmed is not None:
+            return line_unicode_trimmed
+
+    return None
+
+
+def _build_edit_region_snippet(
+    previous: str,
+    current: str,
+    context_lines: int = 4,
+    max_changed_lines: int = 1000,
+) -> Optional[Dict[str, Any]]:
+    if previous == current:
+        return None
+
+    prev_lines = previous.splitlines()
+    curr_lines = current.splitlines()
+    total_lines = len(curr_lines)
+    if total_lines == 0:
+        return {
+            "start_line": 0,
+            "end_line": 0,
+            "total_lines": 0,
+            "content": "(file is now empty)",
+            "too_large": False,
+        }
+
+    first_diff = 0
+    limit = min(len(prev_lines), len(curr_lines))
+    while first_diff < limit and prev_lines[first_diff] == curr_lines[first_diff]:
+        first_diff += 1
+
+    prev_idx = len(prev_lines) - 1
+    curr_idx = len(curr_lines) - 1
+    while prev_idx >= first_diff and curr_idx >= first_diff and prev_lines[prev_idx] == curr_lines[curr_idx]:
+        prev_idx -= 1
+        curr_idx -= 1
+
+    changed_start = first_diff
+    changed_end = max(changed_start, curr_idx)
+    changed_count = changed_end - changed_start + 1
+
+    if changed_count > max_changed_lines:
+        return {
+            "start_line": changed_start + 1,
+            "end_line": changed_end + 1,
+            "total_lines": total_lines,
+            "content": "(changed region too large for inline snippet)",
+            "too_large": True,
+        }
+
+    snippet_start = max(0, changed_start - context_lines)
+    snippet_end = min(total_lines - 1, changed_end + context_lines)
+    lines = [f"{idx + 1:4}| {curr_lines[idx]}" for idx in range(snippet_start, snippet_end + 1)]
+    return {
+        "start_line": snippet_start + 1,
+        "end_line": snippet_end + 1,
+        "total_lines": total_lines,
+        "content": "\n".join(lines),
+        "too_large": False,
+    }
+
+
 def _find_and_read_spec() -> str:
     """Find and read spec/test file in sandbox if model hasn't read it yet."""
     sandbox = _state_mod.SANDBOX_ROOT
@@ -521,25 +733,32 @@ def edit(args: Any) -> str:
     except Exception:
         return f"error: file not found: {display_path}"
 
+    resolved_old = old
     if old not in text:
+        resolved_old = _resolve_old_text(text, old)
+    if resolved_old is None:
         read_hint = ""
         if path not in FILE_VERSIONS:
             read_hint = " Hint: reading the file first often avoids stale/guessed context."
         return (
             f"error: old text was not found in {basename}.\n"
-            f"This usually means whitespace or line-break mismatch.\n"
+            "This usually means whitespace, line-break, or Unicode punctuation mismatch.\n"
             f"Here is the current content of {basename}:\n{text}\n"
             f"Action: copy the exact text (including whitespace) from above, or use write_file to rewrite the file.{read_hint}"
         )
 
-    count = text.count(old)
+    count = text.count(resolved_old)
     if not args.get("all") and count > 1:
         return (
             f"error: 'old' text appears {count} times in {basename}; it must be unique. "
             f"Include more surrounding lines in 'old' to make it unique, or set all=true to replace all occurrences."
         )
 
-    replacement = text.replace(old, new) if args.get("all") else text.replace(old, new, 1)
+    replacement = (
+        text.replace(resolved_old, new)
+        if args.get("all")
+        else text.replace(resolved_old, new, 1)
+    )
     if replacement == text:
         return f"error: no change - old and new produce identical result in {basename}."
 
@@ -562,10 +781,6 @@ def edit(args: Any) -> str:
         _NOOP_COUNTS[path].pop("edit_noop", None)
 
     replacement_count = count if args.get("all") else 1
-    file_state = (
-        f"file_state: lines={_content_line_count(replacement)} "
-        f"chars={len(replacement)} sha256={_content_digest(replacement)}"
-    )
     changed_lines = _changed_lines_est(text, replacement)
     symbols = _changed_symbols(text, replacement)
     mutation = _record_mutation(
@@ -582,14 +797,30 @@ def edit(args: Any) -> str:
     state_brief = _mutation_brief_line(mutation)
     state_line = _mutation_state_line(mutation)
     summary = _change_summary(text, replacement)
-    changed_preview = _changed_line_preview(text, replacement)
-    return (
-        f"ok: {replacement_count} replacement(s). Edit applied in {basename}.\n"
-        f"{file_state}\n"
-        f"{decision_hint}\n"
-        f"{state_brief}\n"
-        f"{state_line}\n"
-        f"{summary}\n"
-        f"{changed_preview}\n"
-        "Action: if this satisfies requirements, call finish; otherwise make the next targeted edit."
-    )
+
+    lines: List[str] = [
+        f"ok: updated {display_path}. {replacement_count} replacement(s).",
+    ]
+
+    if _edit_success_snippet_enabled():
+        snippet = _build_edit_region_snippet(text, replacement)
+        if snippet is not None:
+            lines.append(
+                f"Showing lines {snippet['start_line']}-{snippet['end_line']} of {snippet['total_lines']}:"
+            )
+            lines.append(snippet["content"])
+
+    lines.append(summary)
+
+    if _edit_verbose_state_enabled():
+        file_state = (
+            f"file_state: lines={_content_line_count(replacement)} "
+            f"chars={len(replacement)} sha256={_content_digest(replacement)}"
+        )
+        lines.append(file_state)
+        lines.append(decision_hint)
+        lines.append(state_brief)
+        lines.append(state_line)
+
+    lines.append("Action: if this satisfies requirements, call finish; otherwise make the next targeted edit.")
+    return "\n".join(lines)

@@ -254,6 +254,7 @@ class TestEditTool(unittest.TestCase):
             "new": "goodbye"
         })
         self.assertIn("ok", result.lower())
+        self.assertIn("Showing lines", result)
         with open(self.test_file) as f:
             self.assertIn("goodbye", f.read())
 
@@ -279,6 +280,36 @@ class TestEditTool(unittest.TestCase):
     def test_edit_invalid_args_type(self):
         result = agent.edit("not a dict")
         self.assertIn("invalid arguments", result.lower())
+
+    def test_edit_relaxed_unicode_quotes_match(self):
+        path = os.path.join(self.temp_dir, "unicode.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('const msg = "hello";\n')
+        agent.FILE_VERSIONS[path] = 'const msg = "hello";\n'
+        result = agent.edit({
+            "path": path,
+            "old": "const msg = \u201chello\u201d;\n",
+            "new": 'const msg = "bye";\n',
+        })
+        self.assertIn("ok:", result.lower())
+        with open(path, encoding="utf-8") as f:
+            self.assertIn('"bye"', f.read())
+
+    def test_edit_relaxed_trim_end_match(self):
+        path = os.path.join(self.temp_dir, "trim.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("alpha   \nsecond\n")
+        agent.FILE_VERSIONS[path] = "alpha   \nsecond\n"
+        result = agent.edit({
+            "path": path,
+            "old": "alpha\n",
+            "new": "beta\n",
+        })
+        self.assertIn("ok:", result.lower())
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("beta\n", content)
+        self.assertNotIn("alpha", content)
 
 
 class TestFinishTool(unittest.TestCase):
@@ -676,6 +707,24 @@ class TestToolResolving(unittest.TestCase):
     def test_resolve_strips_harmony_tokens(self):
         self.assertEqual(agent.resolve_tool_name("read<|channel|>commentary"), "read")
 
+    def test_resolve_alias_grep_search(self):
+        previous = dict(_inner.TOOL_ALIAS_MAP)
+        try:
+            _inner.TOOL_ALIAS_MAP["grep_search"] = "search"
+            self.assertEqual(agent.resolve_tool_name("grep_search"), "search")
+        finally:
+            _inner.TOOL_ALIAS_MAP.clear()
+            _inner.TOOL_ALIAS_MAP.update(previous)
+
+    def test_resolve_alias_list_directory(self):
+        previous = dict(_inner.TOOL_ALIAS_MAP)
+        try:
+            _inner.TOOL_ALIAS_MAP["list_directory"] = "ls"
+            self.assertEqual(agent.resolve_tool_name("list_directory"), "ls")
+        finally:
+            _inner.TOOL_ALIAS_MAP.clear()
+            _inner.TOOL_ALIAS_MAP.update(previous)
+
 
 class TestProcessToolCall(unittest.TestCase):
     """Test tool call processing behavior."""
@@ -802,6 +851,31 @@ class TestProcessToolCall(unittest.TestCase):
         _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
         self.assertEqual(args.get("pat"), "needle")
         self.assertEqual(result, "ok:needle")
+
+    def test_process_tool_call_alias_absolute_path_maps_to_read_path(self):
+        tools_dict = {"read": ("read", {"path": "string"}, lambda a: f"ok:{a.get('path')}")}
+        tool_call = {
+            "function": {
+                "name": "read",
+                "arguments": "{\"absolute_path\":\"react.js\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(args.get("path"), "react.js")
+        self.assertEqual(result, "ok:react.js")
+
+    def test_process_tool_call_alias_old_str_and_new_str_map_to_edit(self):
+        tools_dict = {"edit": ("edit", {"path": "string", "old": "string", "new": "string"}, lambda a: f"ok:{a.get('old')}->{a.get('new')}")}
+        tool_call = {
+            "function": {
+                "name": "edit",
+                "arguments": "{\"path\":\"react.js\",\"old_str\":\"a\",\"new_str\":\"b\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(args.get("old"), "a")
+        self.assertEqual(args.get("new"), "b")
+        self.assertEqual(result, "ok:a->b")
 
     def test_process_tool_call_alias_question_maps_to_plan_solution_prompt(self):
         tools_dict = {"plan_solution": ("plan", {"prompt": "string"}, lambda a: f"ok:{a.get('prompt')}")}

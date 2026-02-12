@@ -70,6 +70,7 @@ _ARG_ALIASES: Dict[str, Dict[str, str]] = {
     "read": {
         "file": "path", "filename": "path", "file_path": "path",
         "filepath": "path", "file_name": "path",
+        "absolute_path": "path",
     },
     "write": {
         "file": "path", "filename": "path", "file_path": "path",
@@ -80,8 +81,10 @@ _ARG_ALIASES: Dict[str, Dict[str, str]] = {
     "edit": {
         "file": "path", "filename": "path", "file_path": "path",
         "filepath": "path", "file_name": "path",
+        "old_str": "old",
         "old_string": "old", "old_text": "old", "search": "old",
         "find": "old", "original": "old", "before": "old",
+        "new_str": "new",
         "new_string": "new", "new_text": "new", "replace": "new",
         "replacement": "new", "after": "new",
     },

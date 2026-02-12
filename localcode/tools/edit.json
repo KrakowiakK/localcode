@@ -5,7 +5,7 @@
     "edit_file"
   ],
   "category": "write",
-  "description": "Replace one exact snippet in an existing file. Use this after read/write for small corrective changes. If old text is not found, read current file and retry with exact text.",
+  "description": "Replace one exact snippet in an existing file. Use this after read/write for small corrective changes. If old text is not found, read current file and retry with exact text.\n\nAccepted arg aliases:\n- old_str / old_string -> old\n- new_str / new_string -> new",
   "feedback": {
     "must_read_before_editing": "FORMAT ERROR: {{tool:edit}} failed due to stale context.\nACTION: Call {{tool:read}}(path) for {{target}}, then retry {{tool:edit}} with exact current text.",
     "old_string_not_found": "ERROR: 'old' string not found in file. Common causes:\n1. Whitespace mismatch (tabs vs spaces, trailing spaces)\n2. String was modified since last read\n3. Guessing content instead of copying from read output\nACTION: Call {{tool:read}}({{target}}), then COPY the exact substring. For small files, use {{tool:write}} instead.",
