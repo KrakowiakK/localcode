@@ -58,6 +58,13 @@ def _edit_success_snippet_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _write_success_snippet_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_WRITE_SNIPPET_SUCCESS", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _edit_verbose_state_enabled() -> bool:
     raw = str(os.environ.get("LOCALCODE_EDIT_VERBOSE_STATE", "")).strip().lower()
     if not raw:
@@ -268,6 +275,17 @@ def _build_edit_region_snippet(
         "content": "\n".join(lines),
         "too_large": False,
     }
+
+
+def _append_region_snippet(lines: List[str], previous: str, current: str) -> bool:
+    snippet = _build_edit_region_snippet(previous, current)
+    if snippet is None:
+        return False
+    lines.append(
+        f"Showing lines {snippet['start_line']}-{snippet['end_line']} of {snippet['total_lines']}:"
+    )
+    lines.append(snippet["content"])
+    return True
 
 
 def _find_and_read_spec() -> str:
@@ -597,17 +615,24 @@ def write(args: Any) -> str:
                 f"\nloop_guard: repeated full-file write streak={mutation.get('write_streak_for_file')} "
                 "on this file; prefer edit/apply_patch or finish."
             )
-        changed_preview = _changed_line_preview("", content)
-        return (
-            f"ok: created {display_path}, +{additions} lines\n"
-            f"{file_state}\n"
-            f"{decision_hint}\n"
-            f"{state_brief}\n"
-            f"{state_line}\n"
-            f"{changed_preview}\n"
-            f"{loop_hint}"
-            f"{spec_inject}{write_hint}"
-        )
+        lines: List[str] = [
+            f"ok: created {display_path}, +{additions} lines",
+            file_state,
+            decision_hint,
+            state_brief,
+            state_line,
+        ]
+        if _write_success_snippet_enabled():
+            _append_region_snippet(lines, "", content)
+        else:
+            lines.append(_changed_line_preview("", content))
+        if loop_hint.strip():
+            lines.append(loop_hint.strip())
+        if spec_inject.strip():
+            lines.append(spec_inject.strip())
+        if write_hint.strip():
+            lines.append(write_hint.strip())
+        return "\n".join(lines)
 
     old_lines = old_content.count("\n")
     new_lines = content.count("\n")
@@ -639,26 +664,42 @@ def write(args: Any) -> str:
             "on this file; prefer edit/apply_patch or finish."
         )
     summary = _change_summary(old_content, content)
+    snippet_lines: List[str] = []
+    if _write_success_snippet_enabled():
+        _append_region_snippet(snippet_lines, old_content, content)
     changed_preview = _changed_line_preview(old_content, content)
     if _write_verbose_state_enabled():
-        return (
-            f"ok: updated {display_path}, +{additions} -{removals} lines\n"
-            f"{file_state}\n"
-            f"{decision_hint}\n"
-            f"{state_brief}\n"
-            f"{state_line}\n"
-            f"{summary}\n"
-            f"{changed_preview}\n"
-            f"{loop_hint}"
-            f"{spec_inject}{write_hint}"
-        )
+        lines: List[str] = [
+            f"ok: updated {display_path}, +{additions} -{removals} lines",
+            file_state,
+            decision_hint,
+            state_brief,
+            state_line,
+            summary,
+        ]
+        if snippet_lines:
+            lines.extend(snippet_lines)
+        else:
+            lines.append(changed_preview)
+        if loop_hint.strip():
+            lines.append(loop_hint.strip())
+        if spec_inject.strip():
+            lines.append(spec_inject.strip())
+        if write_hint.strip():
+            lines.append(write_hint.strip())
+        return "\n".join(lines)
 
     out: List[str] = [
         f"ok: updated {display_path}, +{additions} -{removals} lines",
         summary,
-        changed_preview,
-        "Action: continue with the next targeted change, or finish if complete.",
     ]
+    if snippet_lines:
+        out.extend(snippet_lines)
+    else:
+        out.append(changed_preview)
+    out.extend([
+        "Action: continue with the next targeted change, or finish if complete.",
+    ])
     if loop_hint.strip():
         out.append(loop_hint.strip())
     if spec_inject.strip():
