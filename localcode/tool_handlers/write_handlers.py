@@ -65,6 +65,13 @@ def _edit_verbose_state_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _write_verbose_state_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_WRITE_VERBOSE_STATE", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
+
+
 _UNICODE_TRANSLATION_TABLE = str.maketrans({
     "\u2018": "'",
     "\u2019": "'",
@@ -633,17 +640,32 @@ def write(args: Any) -> str:
         )
     summary = _change_summary(old_content, content)
     changed_preview = _changed_line_preview(old_content, content)
-    return (
-        f"ok: updated {display_path}, +{additions} -{removals} lines\n"
-        f"{file_state}\n"
-        f"{decision_hint}\n"
-        f"{state_brief}\n"
-        f"{state_line}\n"
-        f"{summary}\n"
-        f"{changed_preview}\n"
-        f"{loop_hint}"
-        f"{spec_inject}{write_hint}"
-    )
+    if _write_verbose_state_enabled():
+        return (
+            f"ok: updated {display_path}, +{additions} -{removals} lines\n"
+            f"{file_state}\n"
+            f"{decision_hint}\n"
+            f"{state_brief}\n"
+            f"{state_line}\n"
+            f"{summary}\n"
+            f"{changed_preview}\n"
+            f"{loop_hint}"
+            f"{spec_inject}{write_hint}"
+        )
+
+    out: List[str] = [
+        f"ok: updated {display_path}, +{additions} -{removals} lines",
+        summary,
+        changed_preview,
+        "Action: continue with the next targeted change, or finish if complete.",
+    ]
+    if loop_hint.strip():
+        out.append(loop_hint.strip())
+    if spec_inject.strip():
+        out.append(spec_inject.strip())
+    if write_hint.strip():
+        out.append(write_hint.strip())
+    return "\n".join(out)
 
 
 def edit(args: Any) -> str:
