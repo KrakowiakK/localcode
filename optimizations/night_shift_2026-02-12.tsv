@@ -17,3 +17,8 @@ baseline_head_to_head	qwen3-coder-next-bf16-v6-generic-two-pass	react,space-age,
 extended_check	default(qwen3-coder-next-bf16 -> v6 prompt)	react,promises,rational-numbers,space-age,rest-api,simple-linked-list,phone-number,sum-of-multiples,robot-name,grade-school	2	8/10	1/10	9/10	40.5s	strong broad result after baseline promotion
 feedback_iter	audit_hint_experiment	react,promises,rational-numbers	2	0/3	3/3	3/3	99.0s	more recovery but worse pass1 + much slower; reverted
 feedback_iter	post_rollback_smoke	react,promises,rational-numbers	2	1/3	1/3	2/3	68.6s	observed run-to-run variance on promises-heavy slice
+promises_sweep	qwen3-coder-next-bf16(v6 default)	promises	2	0/1	1/1	1/1	73.5s	lowest-latency passing profile in sweep
+promises_sweep	qwen3-coder-next-bf16-v5-generic-strong	promises	2	0/1	1/1	1/1	135.4s	passes but high tool churn/time
+promises_sweep	qwen3-coder-next-bf16-v2	promises	2	0/1	0/1	0/1	113.5s	regression
+promises_sweep	qwen3-coder-next-bf16-v7-generic-stability	promises	2	0/1	0/1	0/1	80.3s	regression
+promises_sweep	qwen3-coder-next-bf16-edit-only	promises	2	0/1	0/1	0/1	92.1s	regression

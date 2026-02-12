@@ -309,3 +309,18 @@ Decision:
 1. Reverted `audit_hint` experiment.
 2. Keep current default at `v6` prompt baseline without extra write-time audit nudge.
 3. Treat `promises` as current bottleneck for next optimization rounds.
+
+### 3) Promises-only profile sweep (tries=2)
+
+Compared profiles:
+- default (`qwen3-coder-next-bf16` now on `v6` prompt)
+- `v2`, `v5-generic-strong`, `v6-generic-two-pass`, `v7-generic-stability`, `edit-only`
+
+Observed:
+1. Passing set was narrow: default/`v6` and `v5` reached `Pass@any=1/1`.
+2. `v5` needed much more tool churn and time.
+3. `v2`, `v7`, and `edit-only` failed both tries on this task in this sweep.
+
+Decision:
+1. Keep `v6` as default for best quality/latency tradeoff.
+2. Do not switch to `v5` despite pass parity on `promises` due major runtime and call-count penalty.
