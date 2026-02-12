@@ -1,7 +1,7 @@
 {
-  "name": "mlx/qwen3-coder-next-bf16",
-  "description": "Qwen3 Coder Next (80B/A3B) bf16 MoE via mlx-lm — baseline uses generic two-pass prompt.",
-  "prompt": "prompts/qwen3-coder-v6-generic-two-pass.txt",
+  "name": "mlx/qwen3-coder-next-bf16-v9-generic-two-pass-readfirst",
+  "description": "Qwen3 Coder Next bf16 with generic two-pass prompt and explicit read-before-mutate precondition.",
+  "prompt": "prompts/qwen3-coder-v9-generic-two-pass-readfirst.txt",
   "model": "/Users/pimpc181/.lmstudio/models/mlx-community/Qwen3-Coder-Next-bf16",
   "url": "http://localhost:1236/v1/chat/completions",
   "temperature": 0.0,

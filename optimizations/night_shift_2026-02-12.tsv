@@ -1,0 +1,16 @@
+group	variant	tasks	tries	pass1	pass2	pass_any	avg_time	notes
+react_single	qwen3-coder-next-bf16	react	1	0/1	0/1	0/1	56.2s	10/13 tests; stable flow with initial read-precondition error
+react_profile_matrix	qwen3-coder-next-bf16-v2	react	1	1/1	1/1	1/1	-	13/13
+react_profile_matrix	qwen3-coder-next-bf16-v6-generic-two-pass	react	1	1/1	1/1	1/1	-	13/13
+react_profile_matrix	qwen3-coder-next-bf16-edit-only	react	1	1/1	1/1	1/1	-	13/13
+triad_compare	qwen3-coder-next-bf16-v2	react,promises,rational-numbers	2	1/3	1/3	2/3	94.0s	slower; more write-heavy churn
+triad_compare	qwen3-coder-next-bf16-v6-generic-two-pass	react,promises,rational-numbers	2	1/3	2/3	3/3	65.8s	best speed/quality balance
+triad_compare	qwen3-coder-next-bf16-edit-only	react,promises,rational-numbers	2	1/3	2/3	3/3	80.4s	higher tool count and runtime than v6
+prompt_iter	qwen3-coder-next-bf16-v9-generic-two-pass-readfirst	react,promises,rational-numbers	2	0/3	2/3	2/3	96.9s	regression; more write churn on react
+v6_tuning	base	react,promises,rational-numbers	2	1/3	2/3	3/3	66.2s	reference configuration
+v6_tuning	LOCALCODE_EDIT_VERBOSE_STATE=1	react,promises,rational-numbers	2	1/3	1/3	2/3	71.3s	regression
+v6_tuning	LOCALCODE_WRITE_SNIPPET_SUCCESS=1	react,promises,rational-numbers	2	1/3	1/3	2/3	82.6s	regression + slower
+v6_tuning	LOCALCODE_EDIT_VERBOSE_STATE=1 LOCALCODE_WRITE_SNIPPET_SUCCESS=1	react,promises,rational-numbers	2	1/3	1/3	2/3	87.1s	regression + slower
+v6_tuning	LOCALCODE_WRITE_SPEC_CONTRACT=1	react,promises,rational-numbers	2	1/3	2/3	3/3	68.1s	tie with base in this batch; slight runtime overhead
+baseline_head_to_head	qwen3-coder-next-bf16	react,space-age,promises,rational-numbers	2	1/4	1/4	2/4	-	react unstable with high tool churn
+baseline_head_to_head	qwen3-coder-next-bf16-v6-generic-two-pass	react,space-age,promises,rational-numbers	2	2/4	2/4	4/4	-	clear winner; promoted to default baseline

@@ -222,3 +222,59 @@ Keep:
 Do not adopt as baseline:
 1. Patch-only profile as primary benchmark mode (insufficient task pass quality).
 2. Edit verbosity/snippet toggles as default quality levers (no measured gain in this slice).
+
+## Night Continuation — Baseline Promotion (2026-02-12)
+
+Data file:
+- `optimizations/night_shift_2026-02-12.tsv`
+
+### 1) React profile sweep (single-task sanity)
+
+Key outcomes:
+1. `qwen3-coder-next-bf16-v2`: `Pass@1=1/1` (`13/13` on `react`).
+2. `qwen3-coder-next-bf16-v6-generic-two-pass`: `Pass@1=1/1` (`13/13` on `react`).
+3. `qwen3-coder-next-bf16-edit-only`: `Pass@1=1/1` (`13/13` on `react`).
+4. Current default `qwen3-coder-next-bf16` (old prompt) repeatedly stayed at `10/13` in this slice.
+
+Interpretation:
+1. Prompt quality dominates this model's behavior more than tool schema changes.
+2. `v6` and `edit-only` both reach top quality on `react`, but `v6` keeps mixed-tool flexibility.
+
+### 2) Triad comparison (react,promises,rational-numbers, tries=2)
+
+Results:
+1. `v2`: `Pass@any=2/3`, avg `94.0s/task`.
+2. `v6`: `Pass@any=3/3`, avg `65.8s/task`.
+3. `edit-only`: `Pass@any=3/3`, avg `80.4s/task`.
+
+Interpretation:
+1. `v6` matched top recovery while using fewer calls and lower runtime than `edit-only`.
+2. `v2` underperformed on recovery and produced heavier write churn.
+3. `v9` (`read-before-mutate` hard precondition) regressed to `Pass@any=2/3` and increased runtime, so it was rejected.
+
+### 3) v6 tuning matrix (3 tasks, tries=2)
+
+Results:
+1. `base`: `Pass@any=3/3` (reference).
+2. `LOCALCODE_EDIT_VERBOSE_STATE=1`: `Pass@any=2/3` (regression).
+3. `LOCALCODE_WRITE_SNIPPET_SUCCESS=1`: `Pass@any=2/3` (regression, slower).
+4. `LOCALCODE_EDIT_VERBOSE_STATE=1 + LOCALCODE_WRITE_SNIPPET_SUCCESS=1`: `Pass@any=2/3` (regression, slower).
+5. `LOCALCODE_WRITE_SPEC_CONTRACT=1`: `Pass@any=3/3` (tie with base, slight runtime overhead).
+
+Interpretation:
+1. Added verbosity/snippet payload increases noise and degrades quality for this model.
+2. `spec_contract` can help in some runs but is not clearly superior to base in repeated runs.
+
+### 4) Baseline head-to-head on wider set (4 tasks found, tries=2)
+
+Tasks resolved by benchmark:
+- `react`, `space-age`, `promises`, `rational-numbers`
+
+Results:
+1. Old default (`qwen3-coder-next-bf16` with `prompts/qwen3-coder.txt`): `Pass@any=2/4`.
+2. `v6` (`qwen3-coder-next-bf16-v6-generic-two-pass`): `Pass@any=4/4`.
+
+Decision:
+1. Promote `v6` to default baseline by pointing `mlx/qwen3-coder-next-bf16` to `prompts/qwen3-coder-v6-generic-two-pass.txt`.
+2. Keep `LOCALCODE_WRITE_SNIPPET_SUCCESS=0` and keep extra verbosity toggles disabled by default.
+3. Keep `spec_contract` optional (not default) until broader multi-task evidence shows consistent gain.
