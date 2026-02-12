@@ -51,6 +51,13 @@ def _inject_tests_on_write_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _enforce_read_before_write_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_ENFORCE_READ_BEFORE_WRITE", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _edit_success_snippet_enabled() -> bool:
     raw = str(os.environ.get("LOCALCODE_EDIT_SNIPPET_SUCCESS", "")).strip().lower()
     if not raw:
@@ -330,6 +337,40 @@ def _find_and_read_spec() -> str:
     return f"\n\nYou have not read the test file. Here are the tests:\n=== {display_spec} ===\n{''.join(out_parts)}"
 
 
+def _companion_spec_paths(path: str) -> List[str]:
+    base, ext = os.path.splitext(path)
+    if ext.lower() not in {".js", ".mjs", ".ts"}:
+        return []
+    candidates = [
+        f"{base}.spec{ext}",
+        f"{base}.test{ext}",
+    ]
+    return [candidate for candidate in candidates if os.path.exists(candidate)]
+
+
+def _write_read_precondition_error(path: str) -> Optional[str]:
+    if not _enforce_read_before_write_enabled():
+        return None
+    if not os.path.exists(path):
+        return None
+    display_path = to_display_path(path)
+    if path not in FILE_VERSIONS:
+        return (
+            f"error: write requires reading current file first: {display_path}.\n"
+            f"Action: read({{\"path\":\"{display_path}\"}}), then retry write."
+        )
+
+    missing_specs = [spec for spec in _companion_spec_paths(path) if spec not in FILE_VERSIONS]
+    if missing_specs:
+        missing_display = ", ".join(to_display_path(spec) for spec in missing_specs)
+        return (
+            "error: write requires reading companion spec/test file first.\n"
+            f"Missing: {missing_display}\n"
+            "Action: read each missing spec/test file, then retry write."
+        )
+    return None
+
+
 def _js_syntax_ok(code: str) -> bool:
     """Check if code is valid JavaScript/ESM syntax using node -c."""
     tmp_path = None
@@ -516,6 +557,10 @@ def write(args: Any) -> str:
         basename = os.path.basename(path)
         return f"error: cannot write to {basename}; test files are read-only. Use write_file on your source code file only."
     display_path = to_display_path(path)
+
+    precondition_error = _write_read_precondition_error(path)
+    if precondition_error:
+        return precondition_error
 
     content = args.get("content")
     if content is None:

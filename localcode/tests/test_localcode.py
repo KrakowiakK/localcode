@@ -172,6 +172,49 @@ class TestWriteTool(unittest.TestCase):
         self.assertTrue(os.path.exists(path))
 
 
+class TestWriteReadPrecondition(unittest.TestCase):
+    """Test optional read-before-write guard for benchmark stability."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.src = os.path.join(self.temp_dir, "sample.js")
+        self.spec = os.path.join(self.temp_dir, "sample.spec.js")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("// source\n")
+        with open(self.spec, "w", encoding="utf-8") as f:
+            f.write("// spec\n")
+        agent.FILE_VERSIONS.clear()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir)
+        agent.FILE_VERSIONS.clear()
+
+    def test_write_requires_source_and_spec_reads_when_enabled(self):
+        with patch.dict(os.environ, {"LOCALCODE_ENFORCE_READ_BEFORE_WRITE": "1"}):
+            first = agent.write({"path": self.src, "content": "export const x = 1;\n"})
+            self.assertIn("requires reading current file first", first)
+
+            _ = agent.read({"path": self.src})
+            second = agent.write({"path": self.src, "content": "export const x = 1;\n"})
+            self.assertIn("requires reading companion spec/test file first", second)
+
+            _ = agent.read({"path": self.spec})
+            third = agent.write({"path": self.src, "content": "export const x = 1;\n"})
+            self.assertTrue(third.startswith("ok:"), third)
+
+    def test_write_without_companion_spec_requires_only_source_read(self):
+        no_spec_src = os.path.join(self.temp_dir, "plain.js")
+        with open(no_spec_src, "w", encoding="utf-8") as f:
+            f.write("// plain\n")
+        with patch.dict(os.environ, {"LOCALCODE_ENFORCE_READ_BEFORE_WRITE": "1"}):
+            first = agent.write({"path": no_spec_src, "content": "export const y = 2;\n"})
+            self.assertIn("requires reading current file first", first)
+            _ = agent.read({"path": no_spec_src})
+            second = agent.write({"path": no_spec_src, "content": "export const y = 2;\n"})
+            self.assertTrue(second.startswith("ok:"), second)
+
+
 class TestDisplayPathNormalization(unittest.TestCase):
     """Ensure tool outputs show sandbox-relative paths, not absolute paths."""
 
