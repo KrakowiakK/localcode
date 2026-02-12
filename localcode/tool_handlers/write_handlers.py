@@ -363,17 +363,17 @@ def _companion_spec_paths(path: str) -> List[str]:
     return [candidate for candidate in candidates if os.path.exists(candidate)]
 
 
-def _spec_focus_hint(path: str) -> str:
+def _spec_focus_payload(path: str) -> Optional[Dict[str, Any]]:
     companion_specs = _companion_spec_paths(path)
     if not companion_specs:
-        return ""
+        return None
 
     spec_path = companion_specs[0]
     try:
         with open(spec_path, "r", encoding="utf-8") as fh:
             content = fh.read()
     except Exception:
-        return ""
+        return None
 
     title_re = re.compile(
         r"\b(?:x?test|x?it)\s*\(\s*([\"'])(?P<title>.+?)\1",
@@ -392,7 +392,7 @@ def _spec_focus_hint(path: str) -> str:
             break
 
     if not titles:
-        return ""
+        return None
 
     selected: List[str] = []
     for item in titles[:2]:
@@ -403,11 +403,16 @@ def _spec_focus_hint(path: str) -> str:
             selected.append(item)
 
     shortened = [item[:90] + ("..." if len(item) > 90 else "") for item in selected]
-    payload = {
+    return {
         "spec": to_display_path(spec_path),
         "tests": len(titles),
         "focus": shortened,
     }
+
+
+def _spec_focus_hint_from_payload(payload: Optional[Dict[str, Any]]) -> str:
+    if not payload:
+        return ""
     return "spec_focus: " + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -801,7 +806,8 @@ def write(args: Any) -> str:
 
     # Optional test injection for weak models (off by default).
     spec_inject = _find_and_read_spec() if _inject_tests_on_write_enabled() else ""
-    spec_focus = _spec_focus_hint(path) if _write_spec_focus_enabled() else ""
+    spec_focus_payload = _spec_focus_payload(path) if _write_spec_focus_enabled() else None
+    spec_focus = _spec_focus_hint_from_payload(spec_focus_payload)
     spec_contract = _spec_contract_hint(path, content) if _write_spec_contract_enabled() else ""
     write_hint = ""
     if _tool_hints_enabled():

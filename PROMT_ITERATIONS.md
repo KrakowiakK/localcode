@@ -278,3 +278,34 @@ Decision:
 1. Promote `v6` to default baseline by pointing `mlx/qwen3-coder-next-bf16` to `prompts/qwen3-coder-v6-generic-two-pass.txt`.
 2. Keep `LOCALCODE_WRITE_SNIPPET_SUCCESS=0` and keep extra verbosity toggles disabled by default.
 3. Keep `spec_contract` optional (not default) until broader multi-task evidence shows consistent gain.
+
+## Late-Night Extension — Broad Check + Feedback Experiment (2026-02-12)
+
+Data file:
+- `optimizations/night_shift_2026-02-12.tsv`
+
+### 1) Broader 10-task check after baseline promotion
+
+Run:
+- `react,promises,rational-numbers,space-age,rest-api,simple-linked-list,phone-number,sum-of-multiples,robot-name,grade-school` with `tries=2`
+
+Result:
+1. `Pass@1=8/10`
+2. `Pass@any=9/10`
+3. Avg time `40.5s/task`
+4. Only persistent failure in this slice: `promises` (`FAIL/FAIL`).
+
+### 2) Extra feedback experiment (write-time `audit_hint`)
+
+Change tested:
+- Added generic write feedback line when companion spec is larger, nudging one correction pass before finish.
+
+Observed outcome:
+1. `Pass@any` on triad stayed high (`3/3`) but `Pass@1` dropped (`0/3`).
+2. Runtime increased significantly (`~99s/task` on triad run).
+3. React flow became more churn-heavy in that run.
+
+Decision:
+1. Reverted `audit_hint` experiment.
+2. Keep current default at `v6` prompt baseline without extra write-time audit nudge.
+3. Treat `promises` as current bottleneck for next optimization rounds.

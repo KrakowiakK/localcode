@@ -252,6 +252,7 @@ class TestWriteSpecFocus(unittest.TestCase):
         self.assertIn("sample.spec.js", out)
         self.assertIn("rejects invalid input", out)
 
+
 class TestWriteSpecContract(unittest.TestCase):
     """Optional spec_contract feedback after write."""
 
