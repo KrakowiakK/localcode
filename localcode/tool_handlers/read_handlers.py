@@ -3,6 +3,7 @@ File reading tool handlers: read(), batch_read().
 """
 
 import difflib
+import hashlib
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,6 +24,37 @@ def _tool_hints_enabled() -> bool:
     if not raw:
         return False
     return raw not in {"0", "false", "no", "off"}
+
+
+def _read_line_numbers_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_READ_LINE_NUMBERS", "1")).strip().lower()
+    if not raw:
+        return True
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _read_style_from_env() -> str:
+    raw = str(os.environ.get("LOCALCODE_READ_STYLE", "")).strip().lower()
+    if raw in {"numbered", "raw", "hashline"}:
+        return raw
+    return "numbered" if _read_line_numbers_enabled() else "raw"
+
+
+def _resolve_read_style(args: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    requested = args.get("format")
+    if requested is None:
+        return _read_style_from_env(), None
+    if not isinstance(requested, str):
+        return None, "error: format must be a string (numbered, raw, hashline)"
+    style = requested.strip().lower()
+    if style not in {"numbered", "raw", "hashline"}:
+        return None, "error: format must be one of: numbered, raw, hashline"
+    return style, None
+
+
+def _hashline_token(line_text: str) -> str:
+    normalized = line_text.rstrip("\r\n")
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:4]
 
 
 def read(args: Any) -> str:
@@ -145,12 +177,22 @@ def read(args: Any) -> str:
         limit = min(limit, total_lines - offset)
 
     selected = lines[offset: offset + limit]
+    style, style_err = _resolve_read_style(args)
+    if style_err:
+        return style_err
 
     out_parts: List[str] = []
     for i, line in enumerate(selected):
+        original_line = line
         if len(line) > MAX_LINE_LENGTH:
             line = line[:MAX_LINE_LENGTH] + "...\n"
-        out_parts.append(f"{offset + i + 1:4}| {line}")
+        if style == "numbered":
+            out_parts.append(f"{offset + i + 1:4}| {line}")
+        elif style == "hashline":
+            token = _hashline_token(original_line)
+            out_parts.append(f"{offset + i + 1}:{token}|{line}")
+        else:
+            out_parts.append(line)
 
     output = "".join(out_parts)
 

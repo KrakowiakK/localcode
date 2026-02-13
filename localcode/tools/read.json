@@ -5,7 +5,7 @@
     "open_file"
   ],
   "category": "read",
-  "description": "Read a file with line numbers. Use when text context is missing or stale. Do not repeat read on unchanged file unless new context is needed.\n\nAccepted arg aliases:\n- absolute_path -> path",
+  "description": "Read a file. Use when text context is missing or stale. Do not repeat read on unchanged file unless new context is needed.\n\nOptional format modes:\n- numbered: \"  42| const x = 1\"\n- raw: \"const x = 1\"\n- hashline: \"42:ab12|const x = 1\"\n\nAccepted arg aliases:\n- absolute_path -> path\n- style/mode/view -> format",
   "feedback": {
     "read_is_directory": "FORMAT ERROR: {{tool:read}} failed: path is a directory.\nACTION: Use {{tool:ls}}(path) to list files, then call {{tool:read}} on a file path.",
     "read_file_not_found": "FORMAT ERROR: {{tool:read}} failed: file not found.\nACTION: Use {{tool:ls}}(path) or {{tool:glob}}(pat, path) to locate the correct file, then call {{tool:read}} with the valid path."
@@ -37,6 +37,15 @@
       "type": "boolean",
       "optional": true,
       "default": false
+    },
+    "format": {
+      "type": "string",
+      "optional": true,
+      "enum": [
+        "numbered",
+        "raw",
+        "hashline"
+      ]
     }
   },
   "handler": "read"

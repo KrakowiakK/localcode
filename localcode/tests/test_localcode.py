@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -113,6 +114,15 @@ class TestReadTool(unittest.TestCase):
         result = agent.read({"path": self.test_file, "limit": "ten"})
         self.assertIn("limit must be an integer", result.lower())
 
+    def test_read_hashline_format(self):
+        result = agent.read({"path": self.test_file, "format": "hashline", "limit": 1})
+        first_line = result.splitlines()[0]
+        self.assertRegex(first_line, r"^1:[0-9a-f]{4}\|line 1$")
+
+    def test_read_invalid_format(self):
+        result = agent.read({"path": self.test_file, "format": "unknown"})
+        self.assertIn("format must be one of", result.lower())
+
     def test_read_negative_offset(self):
         result = agent.read({"path": self.test_file, "offset": -1})
         self.assertIn("offset must be >=", result.lower())
@@ -170,6 +180,58 @@ class TestWriteTool(unittest.TestCase):
         result = agent.write({"path": path, "content": "nested"})
         self.assertIn("ok", result.lower())
         self.assertTrue(os.path.exists(path))
+
+    def test_write_verbose_can_drop_selected_fields(self):
+        path = os.path.join(self.temp_dir, "drop-fields.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("old\n")
+        _ = agent.read({"path": path})
+        with patch.dict(
+            os.environ,
+            {
+                "LOCALCODE_WRITE_VERBOSE_STATE": "1",
+                "LOCALCODE_WRITE_FULL_DROP": "state_json,state_brief,changed_symbols",
+            },
+        ):
+            result = agent.write({"path": path, "content": "new\n"})
+        self.assertIn("file_state:", result)
+        self.assertIn("change_summary:", result)
+        self.assertIn("changed_lines_preview:", result)
+        self.assertNotIn("state_json:", result)
+        self.assertNotIn("state_brief:", result)
+        self.assertNotIn("changed_symbols:", result)
+
+    def test_write_verbose_drops_state_json_by_default(self):
+        path = os.path.join(self.temp_dir, "default-drop.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("old\n")
+        _ = agent.read({"path": path})
+        with patch.dict(
+            os.environ,
+            {
+                "LOCALCODE_WRITE_VERBOSE_STATE": "1",
+            },
+            clear=False,
+        ):
+            result = agent.write({"path": path, "content": "new\n"})
+        self.assertIn("file_state:", result)
+        self.assertIn("change_summary:", result)
+        self.assertNotIn("state_json:", result)
+
+    def test_write_verbose_can_force_state_json_with_none_drop(self):
+        path = os.path.join(self.temp_dir, "none-drop.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("old\n")
+        _ = agent.read({"path": path})
+        with patch.dict(
+            os.environ,
+            {
+                "LOCALCODE_WRITE_VERBOSE_STATE": "1",
+                "LOCALCODE_WRITE_FULL_DROP": "none",
+            },
+        ):
+            result = agent.write({"path": path, "content": "new\n"})
+        self.assertIn("state_json:", result)
 
 
 class TestWriteReadPrecondition(unittest.TestCase):
@@ -482,6 +544,42 @@ class TestEditTool(unittest.TestCase):
             content = f.read()
         self.assertIn("beta\n", content)
         self.assertNotIn("alpha", content)
+
+    def test_edit_hashline_anchor_replace(self):
+        path = os.path.join(self.temp_dir, "anchor.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("one\nmiddle\nthree\n")
+        read_out = agent.read({"path": path, "format": "hashline"})
+        line_ref = read_out.splitlines()[1].split("|", 1)[0]
+
+        result = agent.edit({
+            "path": path,
+            "old_start": line_ref,
+            "new": "updated-middle\n",
+        })
+        self.assertIn("ok:", result.lower())
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertEqual(content, "one\nupdated-middle\nthree\n")
+
+    def test_edit_hashline_anchor_mismatch(self):
+        path = os.path.join(self.temp_dir, "anchor-mismatch.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("a\nb\nc\n")
+        result = agent.edit({
+            "path": path,
+            "old_start": "2:ffff",
+            "new": "B\n",
+        })
+        self.assertIn("hash mismatch", result.lower())
+
+    def test_edit_hashline_end_requires_start(self):
+        result = agent.edit({
+            "path": self.test_file,
+            "old_end": "2:abcd",
+            "new": "x",
+        })
+        self.assertIn("old_end requires old_start", result.lower())
 
 
 class TestFinishTool(unittest.TestCase):
@@ -1048,6 +1146,36 @@ class TestProcessToolCall(unittest.TestCase):
         self.assertEqual(args.get("old"), "a")
         self.assertEqual(args.get("new"), "b")
         self.assertEqual(result, "ok:a->b")
+
+    def test_process_tool_call_alias_style_maps_to_read_format(self):
+        tools_dict = {"read": ("read", {"path": "string", "format": "string?"}, lambda a: f"ok:{a.get('format')}")}
+        tool_call = {
+            "function": {
+                "name": "read",
+                "arguments": "{\"path\":\"react.js\",\"style\":\"hashline\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(args.get("format"), "hashline")
+        self.assertEqual(result, "ok:hashline")
+
+    def test_process_tool_call_alias_line_start_maps_to_edit_old_start(self):
+        tools_dict = {
+            "edit": (
+                "edit",
+                {"path": "string", "old_start": "string?", "new": "string"},
+                lambda a: f"ok:{a.get('old_start')}",
+            )
+        }
+        tool_call = {
+            "function": {
+                "name": "edit",
+                "arguments": "{\"path\":\"react.js\",\"line_start\":\"12:ab12\",\"new\":\"x\"}",
+            }
+        }
+        _name, args, result, _response_name = agent.process_tool_call(tools_dict, tool_call)
+        self.assertEqual(args.get("old_start"), "12:ab12")
+        self.assertEqual(result, "ok:12:ab12")
 
     def test_process_tool_call_alias_question_maps_to_plan_solution_prompt(self):
         tools_dict = {"plan_solution": ("plan", {"prompt": "string"}, lambda a: f"ok:{a.get('prompt')}")}

@@ -27,12 +27,21 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCHMARK_DIR="$PROJECT_DIR/benchmark"
+LOCALCODE_FLAGS_LIB="$SCRIPT_DIR/localcode-flags.sh"
 
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+
+if [ ! -f "$LOCALCODE_FLAGS_LIB" ]; then
+    echo -e "${RED}ERROR: missing shared LOCALCODE flags file: $LOCALCODE_FLAGS_LIB${NC}"
+    exit 1
+fi
+# shellcheck source=bin/localcode-flags.sh
+source "$LOCALCODE_FLAGS_LIB"
+localcode_apply_flag_defaults
 
 # Check if setup has been run
 if [ ! -d "$PROJECT_DIR/benchmark" ]; then
@@ -267,7 +276,7 @@ LANG_ARGS="--languages javascript"
 if [ "$RUN_FULL" = true ]; then
     LANG_ARGS=""
 fi
-LOCALCODE_TURN_SUMMARY=${LOCALCODE_TURN_SUMMARY:-1} LOCALCODE_STREAM_OUTPUT=${LOCALCODE_STREAM_OUTPUT:-1} AGENT="${AGENT:-localcode}" NAME="$NAME" "$SCRIPT_DIR/run-localcode-benchmark.sh" $LANG_ARGS $TASKS
+AGENT="${AGENT:-localcode}" NAME="$NAME" "$SCRIPT_DIR/run-localcode-benchmark.sh" $LANG_ARGS $TASKS
 
 # Post-benchmark stats
 RESULTS_DIR="$BENCHMARK_DIR/tmp.benchmark"
@@ -288,6 +297,12 @@ run_dir = Path(os.environ["RUN_DIR"])
 run_full = str(os.environ.get("RUN_FULL", "")).lower() == "true"
 log_dir = Path(os.environ.get("LOG_DIR", ""))
 agent_config = os.environ.get("LOCALCODE_AGENT_CONFIG", "localcode")
+flag_keys_csv = os.environ.get("LOCALCODE_FLAG_KEYS_CSV", "")
+flag_keys = [
+    key.strip()
+    for key in flag_keys_csv.split(",")
+    if key.strip().startswith("LOCALCODE_")
+]
 
 results = {}
 entries = []
@@ -409,7 +424,13 @@ def find_step_for_error(flow_steps, tool_call_id, tool_name):
     return None
 
 if log_dir.is_dir():
-    log_patterns = [f"localcode_{agent_config}_*.jsonl", "localcode_*.jsonl"]
+    safe_agent = re.sub(r"[^A-Za-z0-9_.-]", "_", agent_config)
+    log_patterns = [
+        f"localcode_{safe_agent}_*.jsonl",   # legacy: localcode_<agent>_<ts>.jsonl
+        f"*_localcode_{safe_agent}.jsonl",   # current: <ts>_localcode_<agent>.jsonl
+        "localcode_*.jsonl",
+        "*_localcode_*.jsonl",
+    ]
     seen_logs = set()
     for pattern in log_patterns:
         for log_path in log_dir.glob(pattern):
@@ -674,6 +695,13 @@ if request_param_sets:
         ("stream", stream_val),
     ]
     print_table("Model & inference (from localcode request logs)", rows, ["param", "value"])
+
+if flag_keys:
+    flag_rows = []
+    for key in flag_keys:
+        value = os.environ.get(key)
+        flag_rows.append((key, "(empty)" if value is None or value == "" else str(value)))
+    print_table("Localcode runtime flags (effective)", flag_rows, ["flag", "value"])
 
 def summarize_usage(buckets):
     total = new_usage_bucket()

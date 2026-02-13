@@ -101,6 +101,61 @@ def _write_verbose_state_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _write_full_drop_fields() -> set[str]:
+    # Default: hide verbose JSON payload to reduce response noise for models.
+    env_raw = os.environ.get("LOCALCODE_WRITE_FULL_DROP")
+    if env_raw is None:
+        return {"state_json"}
+    raw = str(env_raw).strip().lower()
+    if not raw:
+        return {"state_json"}
+    if raw in {"0", "false", "no", "off", "none"}:
+        return set()
+    fields: set[str] = set()
+    for token in re.split(r"[,\s]+", raw):
+        name = token.strip()
+        if name:
+            fields.add(name)
+    return fields
+
+
+def _write_full_field_enabled(drop_fields: set[str], field_name: str) -> bool:
+    return field_name.strip().lower() not in drop_fields
+
+
+def _is_default_write_decision_hint(decision_hint: str) -> bool:
+    return decision_hint.strip() == "decision_hint: change_applied; continue_or_finish"
+
+
+def _edit_hash_anchor_enabled() -> bool:
+    raw = str(os.environ.get("LOCALCODE_EDIT_HASH_ANCHOR", "")).strip().lower()
+    if not raw:
+        return False
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _snippet_style() -> str:
+    raw = str(os.environ.get("LOCALCODE_SNIPPET_STYLE", "")).strip().lower()
+    if not raw:
+        return "numbered"
+    if raw in {"numbered", "raw", "raw_meta", "hashline", "hashline_meta"}:
+        return raw
+    return "numbered"
+
+
+def _hashline_token(line_text: str) -> str:
+    normalized = line_text.rstrip("\r\n")
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:4]
+
+
+def _format_snippet_line(line_no_1based: int, line_text: str, style: str) -> str:
+    if style == "numbered":
+        return f"{line_no_1based:4}| {line_text}"
+    if style in {"hashline", "hashline_meta"}:
+        return f"{line_no_1based}:{_hashline_token(line_text)}|{line_text}"
+    return line_text
+
+
 _UNICODE_TRANSLATION_TABLE = str.maketrans({
     "\u2018": "'",
     "\u2019": "'",
@@ -206,6 +261,57 @@ def _find_unique_line_window_slice(
     return canonical
 
 
+def _find_unique_anchor_window_slice(text: str, needle: str) -> Optional[str]:
+    """Fallback: match by first+last non-empty normalized lines within same window length."""
+    haystack_lines = text.splitlines(keepends=True)
+    needle_lines = needle.splitlines(keepends=True)
+    if not haystack_lines or not needle_lines:
+        return None
+    if len(needle_lines) > len(haystack_lines):
+        return None
+
+    needle_noeol = [line.rstrip("\r\n") for line in needle_lines]
+    hay_noeol = [line.rstrip("\r\n") for line in haystack_lines]
+
+    non_empty_positions = [
+        idx for idx, line in enumerate(needle_noeol)
+        if _normalize_unicode_for_match(line).strip()
+    ]
+    if len(non_empty_positions) < 2:
+        return None
+
+    first_pos = non_empty_positions[0]
+    last_pos = non_empty_positions[-1]
+    first_anchor = _normalize_unicode_for_match(needle_noeol[first_pos]).rstrip()
+    last_anchor = _normalize_unicode_for_match(needle_noeol[last_pos]).rstrip()
+
+    if not first_anchor or not last_anchor:
+        return None
+
+    window = len(needle_lines)
+    matches: List[int] = []
+    for start in range(len(hay_noeol) - window + 1):
+        first_line = _normalize_unicode_for_match(hay_noeol[start + first_pos]).rstrip()
+        if first_line != first_anchor:
+            continue
+        last_line = _normalize_unicode_for_match(hay_noeol[start + last_pos]).rstrip()
+        if last_line != last_anchor:
+            continue
+        matches.append(start)
+        if len(matches) > 1:
+            return None
+
+    if not matches:
+        return None
+
+    first = matches[0]
+    selected = haystack_lines[first:first + window]
+    canonical = "".join(selected)
+    if not needle.endswith(("\n", "\r")):
+        canonical = _strip_single_trailing_newline(canonical)
+    return canonical
+
+
 def _resolve_old_text(text: str, old: str) -> Optional[str]:
     if old in text:
         return old
@@ -238,6 +344,11 @@ def _resolve_old_text(text: str, old: str) -> Optional[str]:
         )
         if line_unicode_trimmed is not None:
             return line_unicode_trimmed
+
+        if _edit_hash_anchor_enabled():
+            anchor_window = _find_unique_anchor_window_slice(text, candidate)
+            if anchor_window is not None:
+                return anchor_window
 
     return None
 
@@ -289,7 +400,11 @@ def _build_edit_region_snippet(
 
     snippet_start = max(0, changed_start - context_lines)
     snippet_end = min(total_lines - 1, changed_end + context_lines)
-    lines = [f"{idx + 1:4}| {curr_lines[idx]}" for idx in range(snippet_start, snippet_end + 1)]
+    style = _snippet_style()
+    lines = [
+        _format_snippet_line(idx + 1, curr_lines[idx], style)
+        for idx in range(snippet_start, snippet_end + 1)
+    ]
     return {
         "start_line": snippet_start + 1,
         "end_line": snippet_end + 1,
@@ -306,6 +421,10 @@ def _append_region_snippet(lines: List[str], previous: str, current: str) -> boo
     lines.append(
         f"Showing lines {snippet['start_line']}-{snippet['end_line']} of {snippet['total_lines']}:"
     )
+    if _snippet_style() in {"raw_meta", "hashline_meta"}:
+        lines.append(
+            f"snippet_line_range: {snippet['start_line']}-{snippet['end_line']}/{snippet['total_lines']}"
+        )
     lines.append(snippet["content"])
     return True
 
@@ -689,10 +808,23 @@ def _changed_line_preview(previous: str, current: str, max_lines: int = 6) -> st
     if not changed_indexes:
         return "changed_lines_preview:\n(no changed lines captured)"
 
+    style = _snippet_style()
     out = ["changed_lines_preview:"]
+    if style == "raw_meta":
+        refs = ", ".join(str(idx + 1) for idx in changed_indexes[:max_lines])
+        if refs:
+            out.append(f"changed_line_numbers: {refs}")
+    elif style == "hashline_meta":
+        refs = ", ".join(
+            f"{idx + 1}:{_hashline_token(curr_lines[idx] if 0 <= idx < len(curr_lines) else '')}"
+            for idx in changed_indexes[:max_lines]
+        )
+        if refs:
+            out.append(f"changed_line_refs: {refs}")
+
     for idx in changed_indexes[:max_lines]:
         line_text = curr_lines[idx] if 0 <= idx < len(curr_lines) else ""
-        out.append(f"{idx + 1:4}| {line_text}")
+        out.append(_format_snippet_line(idx + 1, line_text, style))
     return "\n".join(out)
 
 
@@ -708,6 +840,98 @@ def _current_file_sha(path: str) -> str:
             return _short_sha_text(f.read())
     except Exception:
         return "unknown"
+
+
+_HASHLINE_REF_RE = re.compile(r"^\s*(\d+)\s*:\s*([0-9a-fA-F]{2,16})(?:\|.*)?\s*$")
+
+
+def _parse_hashline_ref(value: Any, field_name: str) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+    if value is None:
+        return None, None, None
+    if isinstance(value, bool):
+        return None, None, f"error: {field_name} must be a line reference string or line number"
+    if isinstance(value, int):
+        if value < 1:
+            return None, None, f"error: {field_name} line number must be >= 1"
+        return value, None, None
+    if not isinstance(value, str):
+        return None, None, f"error: {field_name} must be a line reference string or line number"
+    text = value.strip()
+    if not text:
+        return None, None, f"error: {field_name} cannot be empty"
+    if text.isdigit():
+        line_no = int(text)
+        if line_no < 1:
+            return None, None, f"error: {field_name} line number must be >= 1"
+        return line_no, None, None
+    match = _HASHLINE_REF_RE.match(text)
+    if not match:
+        return None, None, (
+            f"error: {field_name} must use hashline format line:hash (example: 42:ab12)"
+        )
+    line_no = int(match.group(1))
+    if line_no < 1:
+        return None, None, f"error: {field_name} line number must be >= 1"
+    return line_no, match.group(2).lower(), None
+
+
+def _resolve_anchor_window(
+    text: str,
+    start_ref: Any,
+    end_ref: Any,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    start_line, start_hash, start_err = _parse_hashline_ref(start_ref, "old_start")
+    if start_err:
+        return None, start_err
+    if start_line is None:
+        return None, "error: old_start is required when using hashline anchors"
+
+    end_line, end_hash, end_err = _parse_hashline_ref(end_ref, "old_end")
+    if end_err:
+        return None, end_err
+    if end_line is None:
+        end_line = start_line
+
+    if end_line < start_line:
+        return None, "error: old_end line must be >= old_start line"
+
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return None, "error: cannot use old_start/old_end on an empty file"
+
+    if start_line > len(lines):
+        return None, (
+            f"error: old_start line {start_line} exceeds file length ({len(lines)} lines)"
+        )
+    if end_line > len(lines):
+        return None, (
+            f"error: old_end line {end_line} exceeds file length ({len(lines)} lines)"
+        )
+
+    start_actual = _hashline_token(lines[start_line - 1])
+    if start_hash and start_hash != start_actual:
+        return None, (
+            f"error: old_start hash mismatch at line {start_line}. "
+            f"expected {start_hash}, actual {start_actual}"
+        )
+
+    end_actual = _hashline_token(lines[end_line - 1])
+    if end_hash and end_hash != end_actual:
+        return None, (
+            f"error: old_end hash mismatch at line {end_line}. "
+            f"expected {end_hash}, actual {end_actual}"
+        )
+
+    prefix = "".join(lines[:start_line - 1])
+    selected = "".join(lines[start_line - 1:end_line])
+    suffix = "".join(lines[end_line:])
+    return {
+        "start_line": start_line,
+        "end_line": end_line,
+        "selected": selected,
+        "prefix": prefix,
+        "suffix": suffix,
+    }, None
 
 
 def write(args: Any) -> str:
@@ -772,22 +996,44 @@ def write(args: Any) -> str:
             decision_hint = _mutation_decision_hint(mutation)
             state_brief = _mutation_brief_line(mutation)
             state_line = _mutation_state_line(mutation)
+            if _write_verbose_state_enabled():
+                if noop_n == 1:
+                    lines = ["ok: no changes - file already has this content."]
+                    if _write_full_field_enabled(full_drop_fields, "file_state"):
+                        lines.append(file_state)
+                    if _write_full_field_enabled(full_drop_fields, "decision_hint"):
+                        lines.append(decision_hint)
+                    if _write_full_field_enabled(full_drop_fields, "state_brief"):
+                        lines.append(state_brief)
+                    if _write_full_field_enabled(full_drop_fields, "state_json"):
+                        lines.append(state_line)
+                    return "\n".join(lines)
+                lines = [
+                    (
+                        f"error: repeated no-op write for {os.path.basename(path)}. "
+                        "Write different content, or call finish if implementation is already correct."
+                    )
+                ]
+                if _write_full_field_enabled(full_drop_fields, "file_state"):
+                    lines.append(file_state)
+                if _write_full_field_enabled(full_drop_fields, "decision_hint"):
+                    lines.append(decision_hint)
+                if _write_full_field_enabled(full_drop_fields, "state_brief"):
+                    lines.append(state_brief)
+                if _write_full_field_enabled(full_drop_fields, "state_json"):
+                    lines.append(state_line)
+                return "\n".join(lines)
             if noop_n == 1:
-                # First noop: keep as success so model can finish when file is already correct.
                 return (
                     "ok: no changes - file already has this content.\n"
                     f"{file_state}\n"
-                    f"{decision_hint}\n"
-                    f"{state_brief}\n"
-                    f"{state_line}"
+                    f"{decision_hint}"
                 )
             return (
                 f"error: repeated no-op write for {os.path.basename(path)}. "
                 "Write different content, or call finish if implementation is already correct.\n"
                 f"{file_state}\n"
-                f"{decision_hint}\n"
-                f"{state_brief}\n"
-                f"{state_line}"
+                f"{decision_hint}"
             )
 
     parent_dir = os.path.dirname(path)
@@ -809,6 +1055,7 @@ def write(args: Any) -> str:
     spec_focus_payload = _spec_focus_payload(path) if _write_spec_focus_enabled() else None
     spec_focus = _spec_focus_hint_from_payload(spec_focus_payload)
     spec_contract = _spec_contract_hint(path, content) if _write_spec_contract_enabled() else ""
+    full_drop_fields = _write_full_drop_fields()
     write_hint = ""
     if _tool_hints_enabled():
         write_hint = "\nHint: optionally read the file to verify, then continue or finish."
@@ -840,18 +1087,22 @@ def write(args: Any) -> str:
             )
         symbols_line = _changed_symbols_line(list(mutation.get("changed_symbols") or []))
         if _write_verbose_state_enabled():
-            lines: List[str] = [
-                f"ok: created {display_path}, +{additions} lines",
-                file_state,
-                decision_hint,
-                state_brief,
-                state_line,
-                symbols_line,
-            ]
-            if _write_success_snippet_enabled():
-                _append_region_snippet(lines, "", content)
-            else:
-                lines.append(_changed_line_preview("", content))
+            lines: List[str] = [f"ok: created {display_path}, +{additions} lines"]
+            if _write_full_field_enabled(full_drop_fields, "file_state"):
+                lines.append(file_state)
+            if _write_full_field_enabled(full_drop_fields, "decision_hint"):
+                lines.append(decision_hint)
+            if _write_full_field_enabled(full_drop_fields, "state_brief"):
+                lines.append(state_brief)
+            if _write_full_field_enabled(full_drop_fields, "state_json"):
+                lines.append(state_line)
+            if _write_full_field_enabled(full_drop_fields, "changed_symbols"):
+                lines.append(symbols_line)
+            if _write_full_field_enabled(full_drop_fields, "changed_lines_preview"):
+                if _write_success_snippet_enabled():
+                    _append_region_snippet(lines, "", content)
+                else:
+                    lines.append(_changed_line_preview("", content))
             if loop_hint.strip():
                 lines.append(loop_hint.strip())
             if spec_inject.strip():
@@ -868,12 +1119,13 @@ def write(args: Any) -> str:
             f"ok: created {display_path}, +{additions} lines",
             file_state,
             _change_summary("", content),
-            symbols_line,
         ]
         if _write_success_snippet_enabled():
             _append_region_snippet(out, "", content)
         else:
             out.append(_changed_line_preview("", content))
+        if not _is_default_write_decision_hint(decision_hint):
+            out.append(decision_hint)
         if loop_hint.strip():
             out.append(loop_hint.strip())
         if spec_inject.strip():
@@ -922,19 +1174,24 @@ def write(args: Any) -> str:
         _append_region_snippet(snippet_lines, old_content, content)
     changed_preview = _changed_line_preview(old_content, content)
     if _write_verbose_state_enabled():
-        lines: List[str] = [
-            f"ok: updated {display_path}, +{additions} -{removals} lines",
-            file_state,
-            decision_hint,
-            state_brief,
-            state_line,
-            summary,
-            symbols_line,
-        ]
-        if snippet_lines:
-            lines.extend(snippet_lines)
-        else:
-            lines.append(changed_preview)
+        lines: List[str] = [f"ok: updated {display_path}, +{additions} -{removals} lines"]
+        if _write_full_field_enabled(full_drop_fields, "file_state"):
+            lines.append(file_state)
+        if _write_full_field_enabled(full_drop_fields, "decision_hint"):
+            lines.append(decision_hint)
+        if _write_full_field_enabled(full_drop_fields, "state_brief"):
+            lines.append(state_brief)
+        if _write_full_field_enabled(full_drop_fields, "state_json"):
+            lines.append(state_line)
+        if _write_full_field_enabled(full_drop_fields, "change_summary"):
+            lines.append(summary)
+        if _write_full_field_enabled(full_drop_fields, "changed_symbols"):
+            lines.append(symbols_line)
+        if _write_full_field_enabled(full_drop_fields, "changed_lines_preview"):
+            if snippet_lines:
+                lines.extend(snippet_lines)
+            else:
+                lines.append(changed_preview)
         if loop_hint.strip():
             lines.append(loop_hint.strip())
         if spec_inject.strip():
@@ -951,12 +1208,13 @@ def write(args: Any) -> str:
         f"ok: updated {display_path}, +{additions} -{removals} lines",
         file_state,
         summary,
-        symbols_line,
     ]
     if snippet_lines:
         out.extend(snippet_lines)
     else:
         out.append(changed_preview)
+    if not _is_default_write_decision_hint(decision_hint):
+        out.append(decision_hint)
     if loop_hint.strip():
         out.append(loop_hint.strip())
     if spec_inject.strip():
@@ -995,29 +1253,42 @@ def edit(args: Any) -> str:
 
     old = args.get("old")
     new = args.get("new")
+    old_start = args.get("old_start")
+    old_end = args.get("old_end")
+    use_anchors = old_start is not None or old_end is not None
 
-    # Graceful fallback: missing old/new → return file content so model can make targeted edit
-    if old is None or new is None:
+    if old_end is not None and old_start is None:
+        return "error: old_end requires old_start"
+    if use_anchors and args.get("all"):
+        return "error: all=true cannot be combined with old_start/old_end anchors"
+
+    # Graceful fallback: missing required args -> return file content so model can retry.
+    # Supported modes:
+    # 1) classic: old + new
+    # 2) hashline anchors: old_start[/old_end] + new (old optional)
+    if new is None or (old is None and not use_anchors):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
             _track_file_version(path, text)
             return (
-                "error: missing required parameters for edit; provide both 'old' and 'new'.\n"
+                "error: missing required parameters for edit; provide old+new or old_start+new.\n"
                 f"Current file content:\n{text}"
             )
         except Exception:
             return f"error: file not found: {display_path}"
 
-    if not isinstance(old, str) or not isinstance(new, str):
-        return "error: old and new must be strings"
+    if old is not None and not isinstance(old, str):
+        return "error: old must be a string when provided"
+    if not isinstance(new, str):
+        return "error: new must be a string"
 
     _NOOP_COUNTS.setdefault(path, {})
 
     basename = os.path.basename(path)
 
     # Noop: old == new — progressive handling to break loops
-    if old == new:
+    if old is not None and old == new and not use_anchors:
         _NOOP_COUNTS[path]["edit_noop"] = _NOOP_COUNTS[path].get("edit_noop", 0) + 1
         noop_n = _NOOP_COUNTS[path]["edit_noop"]
         current_sha = _current_file_sha(path)
@@ -1057,32 +1328,42 @@ def edit(args: Any) -> str:
     except Exception:
         return f"error: file not found: {display_path}"
 
-    resolved_old = old
-    if old not in text:
-        resolved_old = _resolve_old_text(text, old)
-    if resolved_old is None:
-        read_hint = ""
-        if path not in FILE_VERSIONS:
-            read_hint = " Hint: reading the file first often avoids stale/guessed context."
-        return (
-            f"error: old text was not found in {basename}.\n"
-            "This usually means whitespace, line-break, or Unicode punctuation mismatch.\n"
-            f"Here is the current content of {basename}:\n{text}\n"
-            f"Action: copy the exact text (including whitespace) from above, then retry edit with a larger exact old/new block if needed.{read_hint}"
-        )
+    replacement_count = 1
+    if use_anchors:
+        anchor_ctx, anchor_err = _resolve_anchor_window(text, old_start, old_end)
+        if anchor_err:
+            return anchor_err
+        replacement = f"{anchor_ctx['prefix']}{new}{anchor_ctx['suffix']}"
+        resolved_old = anchor_ctx["selected"]
+    else:
+        resolved_old = old
+        if old not in text:
+            resolved_old = _resolve_old_text(text, old)
+        if resolved_old is None:
+            read_hint = ""
+            if path not in FILE_VERSIONS:
+                read_hint = " Hint: reading the file first often avoids stale/guessed context."
+            return (
+                f"error: old text was not found in {basename}.\n"
+                "This usually means whitespace, line-break, or Unicode punctuation mismatch.\n"
+                f"Here is the current content of {basename}:\n{text}\n"
+                f"Action: copy the exact text (including whitespace) from above, then retry edit with a larger exact old/new block if needed.{read_hint}"
+            )
 
-    count = text.count(resolved_old)
-    if not args.get("all") and count > 1:
-        return (
-            f"error: 'old' text appears {count} times in {basename}; it must be unique. "
-            f"Include more surrounding lines in 'old' to make it unique, or set all=true to replace all occurrences."
-        )
+        count = text.count(resolved_old)
+        if not args.get("all") and count > 1:
+            return (
+                f"error: 'old' text appears {count} times in {basename}; it must be unique. "
+                f"Include more surrounding lines in 'old' to make it unique, or set all=true to replace all occurrences."
+            )
 
-    replacement = (
-        text.replace(resolved_old, new)
-        if args.get("all")
-        else text.replace(resolved_old, new, 1)
-    )
+        replacement = (
+            text.replace(resolved_old, new)
+            if args.get("all")
+            else text.replace(resolved_old, new, 1)
+        )
+        replacement_count = count if args.get("all") else 1
+
     if replacement == text:
         return f"error: no change - old and new produce identical result in {basename}."
 
@@ -1104,7 +1385,6 @@ def edit(args: Any) -> str:
     if path in _NOOP_COUNTS:
         _NOOP_COUNTS[path].pop("edit_noop", None)
 
-    replacement_count = count if args.get("all") else 1
     changed_lines = _changed_lines_est(text, replacement)
     symbols = _changed_symbols(text, replacement)
     mutation = _record_mutation(
