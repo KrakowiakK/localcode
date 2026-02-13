@@ -210,6 +210,74 @@ and displays statistics after completion.
 Docker runner — called internally by `run-benchmark.sh`.
 Mounts `benchmark/` and `localcode/` into the container and runs `benchmark.py`.
 
+### Environment Flags (`LOCALCODE_*`)
+
+All boolean flags accept: `1/true/yes/on` and `0/false/no/off`.
+
+`bin/run-benchmark.sh` and `bin/run-localcode-benchmark.sh` share defaults from `bin/localcode-flags.sh`.
+The benchmark statistics table (`Localcode runtime flags (effective)`) prints the effective values of these runner-managed flags.
+
+#### Runner-managed flags (defaults from `bin/localcode-flags.sh`)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `LOCALCODE_TURN_SUMMARY` | `1` | Prints task/try headers in terminal output. |
+| `LOCALCODE_STREAM_OUTPUT` | `1` | Forwarded by runner; currently not consumed directly by `localcode` code paths. |
+| `LOCALCODE_TASK_OUTPUT_MODE` | `runtime` | Forwarded by runner; reserved for benchmark output mode control. |
+| `LOCALCODE_BENCHMARK_OUTPUT_MODE` | `runtime` | Forwarded by runner; reserved for benchmark output mode control. |
+| `LOCALCODE_TASK_SKIP_READONLY` | empty | Forwarded by runner; reserved for task filtering behavior. |
+| `LOCALCODE_WRITE_VERBOSE_STATE` | `1` | Enables verbose write tool result blocks (`file_state`, summaries, previews). |
+| `LOCALCODE_EDIT_VERBOSE_STATE` | empty | Enables verbose edit tool result state when set truthy. |
+| `LOCALCODE_EDIT_SNIPPET_SUCCESS` | empty | Controls edit success region snippet (`empty` = enabled by default). |
+| `LOCALCODE_WRITE_SNIPPET_SUCCESS` | empty | Controls write success region snippet (`empty` = disabled by default). |
+| `LOCALCODE_ENFORCE_READ_BEFORE_WRITE` | `1` | Requires source/spec read before write/edit/patch in benchmark workflow. |
+| `LOCALCODE_INJECT_TESTS_ON_WRITE` | empty | Injects spec/test content hints into write feedback when enabled. |
+| `LOCALCODE_WRITE_SPEC_FOCUS` | `0` | Adds spec focus hints into write feedback. |
+| `LOCALCODE_WRITE_SPEC_CONTRACT` | empty | Adds missing-contract hints from spec into write feedback. |
+| `LOCALCODE_WRITE_FULL_DROP` | `state_json` | Comma-separated list of verbose write fields to suppress. Use `none` to keep all. |
+| `LOCALCODE_PATH_AUTOCORRECT_GLOBAL` | empty | Allows filename auto-correction search across whole sandbox (not only current task scope). |
+| `LOCALCODE_READ_LINE_NUMBERS` | `0` | Legacy read formatting toggle (`0` => raw by default unless overridden). |
+| `LOCALCODE_READ_STYLE` | empty | Default read style: `numbered`, `raw`, `hashline`. |
+| `LOCALCODE_EDIT_HASH_ANCHOR` | `0` | Enables relaxed anchor-window matching for edit old-text recovery. |
+| `LOCALCODE_SNIPPET_STYLE` | `numbered` | Snippet format in write/edit feedback: `numbered`, `raw`, `raw_meta`, `hashline`, `hashline_meta`. |
+
+#### Agent/runtime flags (read directly by `localcode`)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `LOCALCODE_BENCHMARK` | auto | Forces benchmark mode; if unset, benchmark mode is inferred from `BENCHMARK_DIR` / `AIDER_DOCKER`. |
+| `LOCALCODE_BLOCK_TEST_EDITS` | auto | Controls blocking edits to test/spec files (`auto` = block in benchmark mode only). |
+| `LOCALCODE_PROMPT_OVERLAY` | empty | Forces a specific prompt overlay key from agent config (`prompt_overlays`). |
+| `LOCALCODE_HISTORY_MAX_MESSAGES` | from agent config | Overrides `history_max_messages` window at runtime. |
+| `LOCALCODE_SEND_TOOL_CATEGORIES` | from agent config (`true`) | Enables/disables `tool_categories` in API request payload. |
+| `LOCALCODE_TOOL_HINTS` | empty | Enables short “what to do next” hints in read/search/write tool responses. |
+
+#### Harness metadata flags (set per run/task)
+
+| Flag | Description |
+|------|-------------|
+| `LOCALCODE_RUN_NAME` | Run identifier used in logs/output grouping. |
+| `LOCALCODE_TASK_ID` | Current task id/name, used in headers and overlay matching. |
+| `LOCALCODE_TASK_INDEX` | 1-based task index in a benchmark batch. |
+| `LOCALCODE_TASK_TOTAL` | Total number of tasks in the current benchmark batch. |
+| `LOCALCODE_AGENT_CONFIG` | Agent config path key (`gguf/<name>` or `mlx/<name>`) passed by runner. |
+| `LOCALCODE_AGENT_ARGS` | Optional extra args passthrough for agent invocation (forwarded by runner). |
+
+#### Internal helper flags
+
+| Flag | Description |
+|------|-------------|
+| `LOCALCODE_FLAG_KEYS_CSV` | Internal runner-generated list of managed flags used to render the stats table. |
+
+Example:
+
+```bash
+LOCALCODE_READ_STYLE=hashline \
+LOCALCODE_SNIPPET_STYLE=hashline_meta \
+LOCALCODE_WRITE_FULL_DROP=state_json,state_brief \
+./bin/run-benchmark.sh qwen3-coder-next-bf16-mlx -k react
+```
+
 ---
 
 ## Localcode Agent
