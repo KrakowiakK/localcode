@@ -18,6 +18,12 @@ inside Docker using the polyglot-benchmark dataset.
 
 Repository: https://github.com/KrakowiakK/localcode
 
+## Recent Updates (2026-02-13)
+
+- `bin/run-benchmark.sh`: benchmark statistics are now also saved to `benchmark_results.txt` inside each run directory (`benchmark/tmp.benchmark/<run>/`).
+- `localcode/middleware/logging_hook.py`: log filenames switched to timestamp-first format (`YYYY-MM-DD_HH-MM-SS_localcode_<agent>.jsonl`) for easier chronological sorting.
+- internal optimization notes/playbooks were moved to a local `md/` workspace directory (excluded from git).
+
 ## How It Works
 
 ```

@@ -90,7 +90,7 @@ def init_logging(log_dir: str, agent_name: Optional[str] = None) -> str:
     os.makedirs(log_dir, exist_ok=True)
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     safe_agent = re.sub(r"[^A-Za-z0-9_.-]", "_", agent_name or "agent")
-    _log_path = os.path.join(log_dir, f"localcode_{safe_agent}_{timestamp}.jsonl")
+    _log_path = os.path.join(log_dir, f"{timestamp}_localcode_{safe_agent}.jsonl")
     return _log_path
 
 

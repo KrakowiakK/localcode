@@ -276,7 +276,7 @@ if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
     echo -e "\n${GREEN}════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}  STATISTICS${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
-RUN_DIR="$RUN_DIR" LOG_DIR="$PROJECT_DIR/localcode/logs" RUN_FULL="$RUN_FULL" LOCALCODE_AGENT_CONFIG="$LOCALCODE_AGENT_CONFIG" python3 - <<'PY'
+STATS_OUTPUT=$(RUN_DIR="$RUN_DIR" LOG_DIR="$PROJECT_DIR/localcode/logs" RUN_FULL="$RUN_FULL" LOCALCODE_AGENT_CONFIG="$LOCALCODE_AGENT_CONFIG" python3 - <<'PY'
 import json
 import os
 import re
@@ -859,6 +859,21 @@ for task in sorted_tasks:
         rows.append((task_id, task_name, line))
 print_table("Per-task flow (sorted by tool calls)", rows, ["id", "task", "flow"])
 PY
+)
+    echo "$STATS_OUTPUT"
+
+    # Save stats to results directory
+    STATS_FILE="$RUN_DIR/benchmark_results.txt"
+    {
+        echo "Localcode Benchmark Results"
+        echo "==========================="
+        echo "Agent: ${AGENT_PREFIX}/${AGENT_NAME_ARG}"
+        echo "Date: $(date)"
+        echo "Run: $NAME"
+        echo ""
+        echo "$STATS_OUTPUT"
+    } > "$STATS_FILE"
+    echo -e "\nStats saved to: ${YELLOW}${STATS_FILE}${NC}"
 else
     echo -e "${RED}No results directory for: $NAME${NC}"
 fi
