@@ -967,6 +967,8 @@ def write(args: Any) -> str:
     if not isinstance(content, str):
         return "error: content must be a string"
 
+    full_drop_fields = _write_full_drop_fields()
+
     old_content = ""
     is_new_file = True
     if os.path.exists(path):
@@ -1055,7 +1057,6 @@ def write(args: Any) -> str:
     spec_focus_payload = _spec_focus_payload(path) if _write_spec_focus_enabled() else None
     spec_focus = _spec_focus_hint_from_payload(spec_focus_payload)
     spec_contract = _spec_contract_hint(path, content) if _write_spec_contract_enabled() else ""
-    full_drop_fields = _write_full_drop_fields()
     write_hint = ""
     if _tool_hints_enabled():
         write_hint = "\nHint: optionally read the file to verify, then continue or finish."
